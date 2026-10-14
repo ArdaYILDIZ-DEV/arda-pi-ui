@@ -473,115 +473,54 @@ export function buildSpinnerLine(
 			: 0;
 	const tpsText = rawTps > 0 ? `${rawTps} tok/s` : null;
 
-	const timerW = visibleWidth(timerText);
-	const tokensW = tokensText ? visibleWidth(tokensText) : 0;
-	const tpsW = tpsText ? visibleWidth(tpsText) : 0;
-	const thinkFullW = thinkingFull ? visibleWidth(thinkingFull) : 0;
-	const thinkShortW = thinkingShort ? visibleWidth(thinkingShort) : 0;
-
+	type Segment = readonly [text: string | null, width: number];
+	const timer: Segment = [timerText, visibleWidth(timerText)];
+	const tokens: Segment = [tokensText, tokensText ? visibleWidth(tokensText) : 0];
+	const rate: Segment = [tpsText, tpsText ? visibleWidth(tpsText) : 0];
+	const full: Segment = [thinkingFull, thinkingFull ? visibleWidth(thinkingFull) : 0];
+	const short: Segment = [thinkingShort, thinkingShort ? visibleWidth(thinkingShort) : 0];
 	const thinkingPaint = paint.dim;
 
-	// Progressive degradation matrix according to available viewport width with direct formatting
-	if (
-		timerText &&
-		tokensText &&
-		tpsText &&
-		thinkingFull &&
-		timerW + tokensW + tpsW + thinkFullW + 12 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
-	}
-	if (
-		timerText &&
-		tokensText &&
-		tpsText &&
-		thinkingShort &&
-		timerW + tokensW + tpsW + thinkShortW + 12 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
-	}
-	if (
-		timerText &&
-		tokensText &&
-		thinkingFull &&
-		timerW + tokensW + thinkFullW + 9 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
-	}
-	if (
-		timerText &&
-		tokensText &&
-		thinkingShort &&
-		timerW + tokensW + thinkShortW + 9 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
-	}
-	if (
-		timerText &&
-		tokensText &&
-		tpsText &&
-		!thinkingFull &&
-		timerW + tokensW + tpsW + 9 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(")")}`;
-	}
-	if (
-		timerText &&
-		tokensText &&
-		!thinkingFull &&
-		timerW + tokensW + 6 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(")")}`;
-	}
-	if (timerText && thinkingFull && timerW + thinkFullW + 6 <= availableSpace) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
-	}
-	if (timerText && thinkingShort && timerW + thinkShortW + 6 <= availableSpace) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
-	}
-	if (
-		tokensText &&
-		tpsText &&
-		thinkingFull &&
-		tokensW + tpsW + thinkFullW + 9 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
-	}
-	if (
-		tokensText &&
-		tpsText &&
-		thinkingShort &&
-		tokensW + tpsW + thinkShortW + 9 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
-	}
-	if (tokensText && thinkingFull && tokensW + thinkFullW + 6 <= availableSpace) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
-	}
-	if (
-		tokensText &&
-		thinkingShort &&
-		tokensW + thinkShortW + 6 <= availableSpace
-	) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
-	}
-	if (thinkingFull && thinkFullW + 3 <= availableSpace) {
-		if (status === "thinking") {
-			return `${glyph} ${verbSpan} ${thinkingPaint(`(${thinkingFull})`)}`;
+	// First fitting candidate wins. Missing segments invalidate a candidate;
+	// dropping them would change the established degradation priority.
+	const candidates: readonly Segment[][] = [
+		[timer, tokens, rate, full],
+		[timer, tokens, rate, short],
+		[timer, tokens, full],
+		[timer, tokens, short],
+		...(!thinkingFull ? [[timer, tokens, rate], [timer, tokens]] : []),
+		[timer, full],
+		[timer, short],
+		[tokens, rate, full],
+		[tokens, rate, short],
+		[tokens, full],
+		[tokens, short],
+		[full],
+		[short],
+		[timer],
+		[tokens, rate],
+		[tokens],
+	];
+	for (const candidate of candidates) {
+		if (candidate.some(([text]) => !text)) continue;
+		// Leading space + parentheses, plus a three-column separator per gap.
+		const width = candidate.reduce((sum, [, width]) => sum + width, candidate.length * 3);
+		if (width > availableSpace) continue;
+
+		// A lone active thinking status paints its parentheses in one span.
+		if (candidate.length === 1 && status === "thinking" &&
+			(candidate[0] === full || candidate[0] === short)) {
+			return `${glyph} ${verbSpan} ${thinkingPaint(`(${candidate[0][0]})`)}`;
 		}
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
-	}
-	if (thinkingShort && thinkShortW + 3 <= availableSpace) {
-		return `${glyph} ${verbSpan} ${thinkingPaint(`(${thinkingShort})`)}`;
-	}
-	if (timerText && timerW + 3 <= availableSpace) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(")")}`;
-	}
-	if (tokensText && tpsText && tokensW + tpsW + 6 <= availableSpace) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(")")}`;
-	}
-	if (tokensText && tokensW + 3 <= availableSpace) {
-		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(")")}`;
+		let byline = paint.dim("(");
+		for (const [index, segment] of candidate.entries()) {
+			if (index > 0) byline += paint.dim(" · ");
+			const text = segment[0]!;
+			byline += segment === full || segment === short
+				? thinkingPaint(text)
+				: paint.dim(text);
+		}
+		return `${glyph} ${verbSpan} ${byline}${paint.dim(")")}`;
 	}
 
 	return `${glyph} ${verbSpan}`;

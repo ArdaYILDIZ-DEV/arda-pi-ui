@@ -342,6 +342,79 @@ describe("spinner", () => {
 			assert.ok(visibleWidth(tightLine) <= 32);
 		});
 
+		it("preserves exact byline priority and painting at every width boundary", () => {
+			const timer = "15sn";
+			const tokens = "↓ 1.5k token";
+			const rate = "48 tok/s";
+			const thinking = "düşünülüyor";
+			const fullThinking = "düşünülüyor (yüksek eforla)";
+			const completed = "3sn düşünüldü";
+			const longTimer = "1sa 1dk 5sn";
+			const smallTokens = "↓ 1 token";
+			const cases: {
+				state: Partial<SpinnerFrameState>;
+				boundaries: [number, string[]][];
+			}[] = [
+				{
+					state: { thinkingStatus: "thinking", effortSuffix: " (yüksek eforla)" },
+					boundaries: [
+						[7, []], [14, [timer]], [21, [thinking]],
+						[28, [timer, thinking]], [43, [timer, tokens, thinking]],
+						[54, [timer, tokens, rate, thinking]],
+						[70, [timer, tokens, rate, fullThinking]],
+					],
+				},
+				{
+					state: { thinkingStatus: 3400 },
+					boundaries: [
+						[7, []], [14, [timer]], [23, [completed]],
+						[30, [timer, completed]], [45, [timer, tokens, completed]],
+						[56, [timer, tokens, rate, completed]],
+					],
+				},
+				{
+					state: { thinkingStatus: null },
+					boundaries: [
+						[7, []], [14, [timer]], [29, [timer, tokens]],
+						[40, [timer, tokens, rate]],
+					],
+				},
+				{
+					state: { thinkingStatus: "thinking", timeMs: 3665000, tokens: 1, tokensPerSecond: 1 },
+					boundaries: [
+						[7, []], [19, [smallTokens]], [21, [thinking]],
+						[33, [smallTokens, thinking]], [35, [longTimer, thinking]],
+						[47, [longTimer, smallTokens, thinking]],
+						[57, [longTimer, smallTokens, "1 tok/s", thinking]],
+					],
+				},
+				{
+					state: { thinkingStatus: "thinking", tokens: 0 },
+					boundaries: [7, 14, 21, 28].map((width, index) =>
+						[width, [[], [timer], [thinking], [timer, thinking]][index]!]),
+				},
+			];
+			for (const { state, boundaries } of cases) {
+				const baseState: SpinnerFrameState = {
+					verb: "Test", timeMs: 15000, tokens: 1500,
+					tokensPerSecond: 48.4, columns: 7, ...state,
+				};
+				const prefix = buildSpinnerLine(baseState, mockPaint);
+				for (let columns = 7; columns <= 100; columns++) {
+					const segments = boundaries.findLast(([width]) => width <= columns)![1];
+					let byline = "";
+					if (segments.length === 1 && state.thinkingStatus === "thinking" &&
+						(segments[0] === thinking || segments[0] === fullThinking)) {
+						byline = ` ${mockPaint.dim(`(${segments[0]})`)}`;
+					} else if (segments.length > 0) {
+						byline = ` ${mockPaint.dim("(")}${segments.map(mockPaint.dim).join(mockPaint.dim(" · "))}${mockPaint.dim(")")}`;
+					}
+					assert.equal(buildSpinnerLine({ ...baseState, columns }, mockPaint),
+						prefix + byline, `status=${state.thinkingStatus}, columns=${columns}`);
+				}
+			}
+		});
+
 		it("safely handles extreme edge cases in frame state", () => {
 			const edgeState: SpinnerFrameState = {
 				verb: "Test",

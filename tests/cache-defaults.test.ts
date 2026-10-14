@@ -45,7 +45,7 @@ it("uses the fallback window for automatic provider sound warnings", (t) => {
 		controller.handleAgentSettled(current);
 		now += 149_999; controller.repaint(current); assert.equal(played.length, 0);
 		now++; controller.repaint(current); assert.deepEqual(played, [1]);
-		assert.match(controller.getStatusSummary(), /5dk varsayılan/);
+		assert.match(controller.getStatusSummary(), /yerel hatırlatıcı/);
 	} finally { controller.dispose(); }
 });
 

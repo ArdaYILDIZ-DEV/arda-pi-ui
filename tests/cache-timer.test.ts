@@ -765,7 +765,7 @@ describe("Cache audio warning milestones & playback", () => {
 		controller.dispose();
 	});
 
-	it("resets local reminder milestones only when a provider request starts", () => {
+	it("resets local reminder milestones after an active run settles, not duplicate settlement", () => {
 		const played: { file: string; repeat: number }[] = [];
 		const controller = new CacheTimerController(300_000, {
 			soundPlayer: (file, repeat = 1) => played.push({ file, repeat }),
@@ -778,7 +778,7 @@ describe("Cache audio warning milestones & playback", () => {
 
 		controller.handleAgentSettled(mock.ctx);
 		controller.checkSoundMilestones(180_000);
-		assert.equal(played.length, 1, "settlement is not cache activity");
+		assert.equal(played.length, 1, "duplicate settlement must not rearm warnings");
 		controller.handleBeforeProviderRequest(mock.ctx);
 		controller.handleAgentSettled(mock.ctx);
 		controller.checkSoundMilestones(180_000);

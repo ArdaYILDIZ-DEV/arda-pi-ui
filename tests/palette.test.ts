@@ -6,6 +6,9 @@ import {
 	rgbTo256,
 	fgAnsi,
 	fg,
+	bgAnsi,
+	bg,
+	isValidHex,
 	stripAnsi,
 	visibleWidth,
 	resolvePalette,
@@ -81,6 +84,40 @@ describe("palette", () => {
 		assert.equal(fgAnsi(undefined as any), FG_DEFAULT);
 		assert.equal(fgAnsi(-1 as any), FG_DEFAULT);
 		assert.equal(fgAnsi(Number.NaN as any), FG_DEFAULT);
+	});
+
+	it("keeps foreground and background numeric encodings distinct", () => {
+		for (let value = 0; value <= 255; value++) {
+			const foreground = value < 8 ? `\x1b[${30 + value}m`
+				: value < 16 ? `\x1b[${82 + value}m` : `\x1b[38;5;${value}m`;
+			assert.equal(fgAnsi(value + 0.25), value === 255 ? FG_DEFAULT : foreground);
+			assert.equal(fgAnsi(value), foreground);
+			assert.equal(bgAnsi(value), `\x1b[48;5;${value}m`);
+		}
+		for (const value of [NaN, Infinity, -1, 256, null, undefined, "#12xz89", "##fff"]) {
+			assert.equal(fgAnsi(value as never), FG_DEFAULT);
+			assert.equal(bgAnsi(value as never), BG_DEFAULT);
+		}
+		assert.equal(bg("#abc", "text"), "\x1b[48;2;170;187;204mtext\x1b[49m");
+		assert.equal(bg("#abc", ""), "");
+	});
+
+	it("preserves hex validation and colors after bounded-cache churn", () => {
+		for (const hex of ["abc", "#ABC", "a1B2c3", "#a1B2c3"]) assert.equal(isValidHex(hex), true);
+		for (const hex of ["ab", "abcd", "abcde", "abcdefg", "#ggg", " abc", "abc\n"]) {
+			assert.equal(isValidHex(hex), false);
+			assert.deepEqual(hexToRgb(hex), { r: 0, g: 0, b: 0 });
+		}
+		for (let i = 0; i < 700; i++) {
+			const hex = `#${i.toString(16).padStart(6, "0")}`;
+			const { r, g, b } = hexToRgb(hex);
+			assert.equal(fgAnsi(hex), `\x1b[38;2;${r};${g};${b}m`);
+			assert.equal(bgAnsi(hex), `\x1b[48;2;${r};${g};${b}m`);
+			assert.equal(fgAnsi(hex, "256color"), `\x1b[38;5;${rgbTo256(r, g, b)}m`);
+			assert.equal(bgAnsi(hex, "256color"), `\x1b[48;5;${rgbTo256(r, g, b)}m`);
+		}
+		assert.equal(fgAnsi("#D77757"), "\x1b[38;2;215;119;87m");
+		assert.equal(bgAnsi("#D77757"), "\x1b[48;2;215;119;87m");
 	});
 
 	it("fg formats text with color and resets to FG_DEFAULT", () => {

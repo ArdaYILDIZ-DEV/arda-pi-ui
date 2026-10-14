@@ -12,7 +12,7 @@ const message = (overrides: Partial<CacheMessage> = {}): CacheMessage => ({ role
 const ctx = { hasUI: false } as UiCtx;
 
 describe("cache request clock", () => {
-	it("does not refresh the request clock on tool completion or settlement", (t) => {
+	it("starts the local idle reminder at settlement, not tool completion", (t) => {
 		let now = 1_000_000;
 		t.mock.method(Date, "now", () => now);
 		const controller = new CacheTimerController({ soundEnabled: false });
@@ -22,9 +22,11 @@ describe("cache request clock", () => {
 			controller.handleMessageEnd({ type: "message_end", message: { role: "assistant" } } as MessageEndEvent, ctx);
 			now += 180_000;
 			controller.handleTurnEnd({} as TurnEndEvent, ctx);
-			controller.handleAgentSettled(ctx);
 			assert.equal(controller.getLastContextTimestamp(), 1_000_000);
-			assert.equal(controller.getState().elapsedMs, 300_000);
+			assert.equal(controller.getState().elapsedMs, 0);
+			controller.handleAgentSettled(ctx);
+			assert.equal(controller.getLastContextTimestamp(), now);
+			assert.equal(controller.getState().elapsedMs, 0);
 		} finally { controller.dispose(); }
 	});
 
@@ -167,7 +169,7 @@ describe("provider cache observations", () => {
 		assert.equal(tracker.observe(model).ttlSource, "fallback");
 	});
 
-	it("shows real provider ages during processing and scales warnings only with known evidence", (t) => {
+	it("retains provider observations without using their lifetime for idle warnings", (t) => {
 		let now = 1_000_000; t.mock.method(Date, "now", () => now);
 		const played: string[] = [];
 		const controller = new CacheTimerController({ soundPlayer: (file) => played.push(file) });
@@ -177,9 +179,9 @@ describe("provider cache observations", () => {
 			controller.handleMessageEnd({ type: "message_end", message: message() } as MessageEndEvent, current);
 			controller.handleAgentSettled(current);
 			now += 180_000; controller.repaint(current);
-			assert.equal(played.length, 0, "1h cache has no 3min deadline");
+			assert.equal(played.length, 1, "local reminder stays five minutes even with a 1h provider lifetime");
 			now = 1_000_000 + 1_800_000; controller.repaint(current);
-			assert.equal(played.length, 1, "50% milestone scales to 30min");
+			assert.equal(played.length, 1, "expired idle windows do not replay missed warnings");
 			controller.handleAgentStart(current);
 			assert.match(formatPromptCacheObservation(controller.getCacheObservation()), /^age 30dk/);
 			assert.match(controller.getStatusSummary(), /Son istek cache read: %70/);

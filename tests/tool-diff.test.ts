@@ -170,6 +170,27 @@ describe("claude-diff parser and helpers", () => {
 });
 
 describe("renderToolDiffLines visual layout", () => {
+	it("preserves symmetric changed-row backgrounds, word highlights and grapheme continuation gutters", () => {
+		for (const [sign, baseBg, wordBg] of [
+			["+", "\x1b[48;2;13;53;22m", "\x1b[48;2;31;89;38m"],
+			["-", "\x1b[48;2;66;12;16m", "\x1b[48;2;122;41;54m"],
+		] as const) {
+			const rows = renderToolDiffLines(`${sign}123 👩‍💻 é 项目 repeated long content`, "", undefined, 18);
+			assert.ok(rows.length > 1);
+			assert.ok(stripAnsi(rows[0]).startsWith(`123 ${sign} `));
+			for (const row of rows) {
+				assert.equal(visibleWidth(row), 18);
+				assert.ok(row.startsWith(baseBg));
+				assert.ok(row.endsWith("\x1b[0m"));
+			}
+			assert.ok(rows.slice(1).every((row) => stripAnsi(row).startsWith("      ")));
+			const empty = renderToolDiffLines(`${sign}123 `, "", undefined, 18);
+			assert.equal(stripAnsi(empty[0]), `123 ${sign} ${" ".repeat(12)}`);
+			const paired = renderToolDiffLines("-1 old\n+1 new", "", undefined, 18);
+			assert.ok(paired[sign === "+" ? 1 : 0].includes(wordBg));
+		}
+	});
+
 	it("renders lines with matching line number and sign gutter", () => {
 		const rendered = renderToolDiffLines(
 			SAMPLE_DIFF,

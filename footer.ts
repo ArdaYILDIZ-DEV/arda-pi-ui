@@ -6,7 +6,8 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { colorizeRgb, formatCacheElapsed, formatPromptCacheObservation, getCacheColor, type CacheTimerController } from "./cache-timer.ts";
+import type { CacheTimerController } from "./cache-timer.ts";
+import { colorizeRgb, formatCacheElapsed, getCacheColor } from "./cache-display.ts";
 import { cacheReadPercent } from "./prompt-cache.ts";
 import type { GitInfoController } from "./git-info.ts";
 import { fg, resolvePalette, resolveThemeAppearance, resolveThemeColorMode, sanitizeControlChars, stripAnsi, themeText } from "./palette.ts";
@@ -179,9 +180,6 @@ export function registerFooter(pi: ExtensionAPI, options: FooterOptions = {}): v
 					const branch = sameBranch ? git.branch : detectedBranch;
 					const changed = sameBranch ? git.changedFiles : 0;
 					const cache = options.cache?.getState();
-					const observation = ctx.model?.provider ? options.cache?.getCacheObservation(ctx) : undefined;
-					const age = observation?.timestamp === undefined ? undefined : Math.max(0, Date.now() - observation.timestamp);
-					const ratio = age !== undefined && observation?.ttlMs ? age / observation.ttlMs : undefined;
 					const hasCache = cache?.isVisible && (cache.lastContextTimestamp !== null || cache.isProcessing);
 					const level = ctx.model?.reasoning ? ` (${pi.getThinkingLevel()})` : "";
 					return buildFooterLines({
@@ -190,11 +188,9 @@ export function registerFooter(pi: ExtensionAPI, options: FooterOptions = {}): v
 						git: branch ? `${branch}${changed > 0 ? ` +${changed}` : ""}` : "",
 						context,
 						cacheHitRate,
-						cacheTimer: observation ? (cache?.isVisible ? formatPromptCacheObservation(observation) : "")
-							: hasCache && options.cache ? `idle ${formatCacheElapsed(cache.isProcessing ? 0 : cache.elapsedMs)} / ${formatCacheElapsed(options.cache.getTtlMs()).replace(" 0sn", "")}` : "",
-						cacheExpired: observation ? (ratio !== undefined && ratio >= 1) : cache?.isExpired ?? false,
-						cacheRatio: observation ? ratio : cache?.isProcessing ? 0 : cache?.ratio,
-						cacheNeutral: observation !== undefined && ratio === undefined,
+						cacheTimer: hasCache && options.cache ? `idle ${formatCacheElapsed(cache.elapsedMs)} / ${formatCacheElapsed(options.cache.getTtlMs()).replace(" 0sn", "")}` : "",
+						cacheExpired: cache?.isExpired ?? false,
+						cacheRatio: cache?.ratio,
 						cost,
 						statuses: footerData.getExtensionStatuses(),
 					}, width, footerPaint(ctx.ui.theme ?? theme));

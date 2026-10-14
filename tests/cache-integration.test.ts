@@ -5,7 +5,7 @@ import { registerCacheTimer } from "../cache-timer.ts";
 import { registerFooter } from "../footer.ts";
 import { stripAnsi, visibleWidth } from "../palette.ts";
 
-it("integrates real usage, request ages, warm costs and model invalidation without sending requests", async (t) => {
+it("keeps a five-minute idle reminder separate from real usage and warm costs", async (t) => {
 	let now = 1_000_000;
 	t.mock.method(Date, "now", () => now);
 	const handlers = new Map<string, Function[]>();
@@ -32,7 +32,8 @@ it("integrates real usage, request ages, warm costs and model invalidation witho
 			component = factory({ requestRender: () => {} }, theme, { getGitBranch: () => "", getExtensionStatuses: () => new Map(), onBranchChange: () => () => {} });
 		} },
 	} as unknown as ExtensionContext;
-	const controller = registerCacheTimer(pi, { soundEnabled: false });
+	const played: number[] = [];
+	const controller = registerCacheTimer(pi, { soundPlayer: (_file, repeat = 1) => played.push(repeat) });
 	registerFooter(pi, { cache: controller });
 	const emit = async (name: string, event: unknown = {}) => {
 		for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
@@ -42,16 +43,27 @@ it("integrates real usage, request ages, warm costs and model invalidation witho
 		await emit("session_start");
 		assert.ok(!row().includes("age "));
 		await emit("agent_start");
-		await emit("before_provider_request", { payload: { cache_control: { type: "ephemeral" } } });
+		await emit("before_provider_request", { payload: { cache_control: { type: "ephemeral", ttl: "1h" } } });
 		const message = { role: "assistant", provider: "anthropic", model: "claude-test", api: "anthropic-messages", stopReason: "stop", timestamp: now, usage: { input: 100, cacheRead: 700, cacheWrite: 200, cost: { total: 0.1 } } };
 		now += 240_000;
 		await emit("message_end", { message });
 		entries.push({ type: "message", message });
+		// A slow streamed write and its tool result must not age the idle reminder.
+		now += 360_000;
+		await emit("message_end", { message: { role: "toolResult", toolName: "write" } });
+		controller.repaint(ctx);
+		assert.match(row(), /cache read 70% \| idle 0sn \/ 5dk/);
+		assert.equal(controller.getState().isExpired, false);
+		assert.deepEqual(played, []);
 		await emit("turn_end"); await emit("agent_settled");
-		assert.match(row(), /cache read 70% \| age 4dk 0sn \/ ~5dk/);
-		assert.ok(!row().includes("ttl 0sn"));
+		assert.match(row(), /idle 0sn \/ 5dk/);
+		assert.deepEqual(played, [], "settlement does not replay overdue warnings");
+		now += 149_999; controller.repaint(ctx);
+		assert.deepEqual(played, []);
+		now++; controller.repaint(ctx);
+		assert.deepEqual(played, [1], "provider TTL does not change the five-minute reminder");
 		await emit("agent_start");
-		assert.match(row(), /age 4dk 0sn \/ ~5dk/);
+		assert.match(row(), /idle 0sn \/ 5dk/);
 		assert.match(controller.getStatusSummary(), /700 read, 200 write, 100 uncached/);
 		const branchReadCount = branchReads;
 		for (let i = 0; i < 10; i++) component!.render(180);
@@ -60,7 +72,7 @@ it("integrates real usage, request ages, warm costs and model invalidation witho
 		now += 30_000;
 		entries.push({ type: "usage", kind: "cache_warm", provider: "anthropic", model: "claude-test", timestamp: new Date(now).toISOString(), usage: { input: 0, cacheRead: 1000, cacheWrite: 0, cost: { total: 0.02 } } });
 		now += 10_000;
-		assert.match(row(), /cache read 70% \| warm age ~10sn \/ ~5dk\*/);
+		assert.match(row(), /cache read 70% \| idle 40sn \/ 5dk/);
 		assert.ok(row().endsWith("$0.120 est"));
 		assert.match(controller.getStatusSummary(), /Pi warm: 1000 read/);
 		for (const width of [1, 15, 30, 60, 100]) assert.ok(visibleWidth(component!.render(width)[0]) <= width);

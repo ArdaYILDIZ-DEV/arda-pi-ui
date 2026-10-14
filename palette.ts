@@ -32,41 +32,14 @@ export function isValidHex(hex: string): boolean {
 }
 
 export function hexToRgb(hex: string): Rgb {
-	if (typeof hex !== "string" || hex.length === 0) return { r: 0, g: 0, b: 0 };
-	const start = hex.charCodeAt(0) === 35 ? 1 : 0; // 35 is '#'
-	const cleanHex = start === 1 ? hex.slice(1) : hex;
-	if (cleanHex.length !== 3 && cleanHex.length !== 6)
-		return { r: 0, g: 0, b: 0 };
-
-	// Validate hex characters strictly [0-9a-fA-F]
-	for (let i = 0; i < cleanHex.length; i++) {
-		const code = cleanHex.charCodeAt(i);
-		const isHex =
-			(code >= 48 && code <= 57) || // 0-9
-			(code >= 65 && code <= 70) || // A-F
-			(code >= 97 && code <= 102); // a-f
-		if (!isHex) return { r: 0, g: 0, b: 0 };
-	}
-
-	if (cleanHex.length === 3) {
-		const r = parseInt(cleanHex[0]! + cleanHex[0]!, 16);
-		const g = parseInt(cleanHex[1]! + cleanHex[1]!, 16);
-		const b = parseInt(cleanHex[2]! + cleanHex[2]!, 16);
-		return {
-			r: Number.isNaN(r) ? 0 : r,
-			g: Number.isNaN(g) ? 0 : g,
-			b: Number.isNaN(b) ? 0 : b,
-		};
-	}
-
-	const r = parseInt(cleanHex.slice(0, 2), 16);
-	const g = parseInt(cleanHex.slice(2, 4), 16);
-	const b = parseInt(cleanHex.slice(4, 6), 16);
-	return {
-		r: Number.isNaN(r) ? 0 : r,
-		g: Number.isNaN(g) ? 0 : g,
-		b: Number.isNaN(b) ? 0 : b,
-	};
+	if (!isValidHex(hex)) return rgb(0, 0, 0);
+	let digits = hex.startsWith("#") ? hex.slice(1) : hex;
+	if (digits.length === 3) digits = digits.split("").map((digit) => digit + digit).join("");
+	return rgb(
+		parseInt(digits.slice(0, 2), 16),
+		parseInt(digits.slice(2, 4), 16),
+		parseInt(digits.slice(4, 6), 16),
+	);
 }
 
 /**
@@ -101,7 +74,7 @@ export function rgbTo256(r: number, g: number, b: number): number {
 export type ColorValue = string | number;
 export type ColorMode = "truecolor" | "256color";
 
-/** Direct colors from /home/arda/.pi/agent/themes/claude-code-dark.json */
+/** Standalone fallback colors; active host themes supply semantic colors. */
 export interface CcPalette {
 	readonly claude: ColorValue;
 	readonly claudeShimmer: ColorValue;
@@ -329,45 +302,38 @@ export function visibleWidth(str: string): number {
 	return width;
 }
 
-export function fgAnsi(
-	color: ColorValue,
-	mode: ColorMode = "truecolor",
-): string {
-	if (typeof color !== "string" && typeof color !== "number") return FG_DEFAULT;
-
-	if (typeof color === "number") {
-		if (!Number.isFinite(color) || color < 0 || color > 255) {
-			return FG_DEFAULT;
-		}
-		return ANSI_256_NUMBERS[Math.floor(color)] ?? FG_DEFAULT;
-	}
-
-	if (!isValidHex(color)) {
-		return FG_DEFAULT;
-	}
-
+/** Shared hex encoding; numeric foreground/background forms intentionally differ. */
+function hexColorAnsi(color: string, mode: ColorMode, background: boolean): string {
+	const fallback = background ? BG_DEFAULT : FG_DEFAULT;
+	if (!isValidHex(color)) return fallback;
 	const safeMode = mode === "256color" ? "256color" : "truecolor";
-	const cacheKey = `${safeMode}:${color}`;
+	const cacheKey = `${background ? "bg:" : ""}${safeMode}:${color}`;
 	const hit = ANSI_CACHE.get(cacheKey);
 	if (hit !== undefined) return hit;
 
 	const { r, g, b } = hexToRgb(color);
-	let ansi: string;
-	if (safeMode === "256color") {
-		const c256 = rgbTo256(r, g, b);
-		ansi = `\x1b[38;5;${c256}m`;
-	} else {
-		ansi = `\x1b[38;2;${r};${g};${b}m`;
-	}
-
+	const code = background ? 48 : 38;
+	const ansi = safeMode === "256color"
+		? `\x1b[${code};5;${rgbTo256(r, g, b)}m`
+		: `\x1b[${code};2;${r};${g};${b}m`;
 	if (ANSI_CACHE.size >= MAX_ANSI_CACHE_SIZE) {
-		// Prune cache if bounded size is reached while retaining preseeded entries
 		ANSI_CACHE.clear();
 		preseedPalette(CLAUDE_CODE_DARK_PALETTE);
 		preseedPalette(CLAUDE_CODE_LIGHT_PALETTE);
 	}
 	ANSI_CACHE.set(cacheKey, ansi);
 	return ansi;
+}
+
+export function fgAnsi(
+	color: ColorValue,
+	mode: ColorMode = "truecolor",
+): string {
+	if (typeof color === "number") {
+		if (!Number.isFinite(color) || color < 0 || color > 255) return FG_DEFAULT;
+		return ANSI_256_NUMBERS[Math.floor(color)] ?? FG_DEFAULT;
+	}
+	return typeof color === "string" ? hexColorAnsi(color, mode, false) : FG_DEFAULT;
 }
 
 export function fg(
@@ -383,45 +349,11 @@ export function bgAnsi(
 	color: ColorValue,
 	mode: ColorMode = "truecolor",
 ): string {
-	if (typeof color !== "string" && typeof color !== "number") return BG_DEFAULT;
-
 	if (typeof color === "number") {
-		if (
-			!Number.isFinite(color) ||
-			Number.isNaN(color) ||
-			color < 0 ||
-			color > 255
-		) {
-			return BG_DEFAULT;
-		}
+		if (!Number.isFinite(color) || color < 0 || color > 255) return BG_DEFAULT;
 		return `\x1b[48;5;${Math.floor(color)}m`;
 	}
-
-	if (!isValidHex(color)) {
-		return BG_DEFAULT;
-	}
-
-	const safeMode = mode === "256color" ? "256color" : "truecolor";
-	const cacheKey = `bg:${safeMode}:${color}`;
-	const hit = ANSI_CACHE.get(cacheKey);
-	if (hit !== undefined) return hit;
-
-	const { r, g, b } = hexToRgb(color);
-	let ansi: string;
-	if (safeMode === "256color") {
-		const c256 = rgbTo256(r, g, b);
-		ansi = `\x1b[48;5;${c256}m`;
-	} else {
-		ansi = `\x1b[48;2;${r};${g};${b}m`;
-	}
-
-	if (ANSI_CACHE.size >= MAX_ANSI_CACHE_SIZE) {
-		ANSI_CACHE.clear();
-		preseedPalette(CLAUDE_CODE_DARK_PALETTE);
-		preseedPalette(CLAUDE_CODE_LIGHT_PALETTE);
-	}
-	ANSI_CACHE.set(cacheKey, ansi);
-	return ansi;
+	return typeof color === "string" ? hexColorAnsi(color, mode, true) : BG_DEFAULT;
 }
 
 export function bg(

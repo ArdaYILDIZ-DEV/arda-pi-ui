@@ -21,6 +21,7 @@ import {
 	ToolExecutionComponent,
 	initTheme,
 	createBashToolDefinition,
+	createReadToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 try {
@@ -159,7 +160,74 @@ describe("tool-renderers pure helpers", () => {
 	});
 });
 
-describe("registerClaudeToolRenderers (builtin official path)", () => {
+describe("registerClaudeToolRenderers (legacy builtin path)", () => {
+	it("does not wrap a third-party builtin name before it is owned", () => {
+		const { pi, registered } = createMockPi(["write"]);
+		const entries = pi.getAllTools();
+		pi.getAllTools = () => entries.map((entry) => ({
+			...entry, sourceInfo: { ...entry.sourceInfo, source: "extension" },
+		}));
+		assert.deepEqual(registerClaudeToolRenderers(pi, "/tmp"), []);
+		assert.equal(registered.length, 0);
+	});
+
+	it("preserves registration order and continues after an individual registration fails", () => {
+		const { pi, registered } = createMockPi(["ls", "bash", "read"]);
+		const register = pi.registerTool.bind(pi);
+		pi.registerTool = (tool) => {
+			if (tool.name === "read") throw new Error("mock registration failure");
+			register(tool);
+		};
+		assert.deepEqual(registerClaudeToolRenderers(pi, "/tmp"), ["bash", "ls"]);
+		assert.deepEqual(registered.map((entry) => entry.name), ["bash", "ls"]);
+	});
+
+	it("retains legacy call details and collapsed summaries for every builtin", () => {
+		const cases = [
+			["read", "Read", { path: "a.ts", offset: 10 }, "a.ts", "Read 2 lines"],
+			["bash", "Bash", { command: "echo hi" }, "echo hi", "Returned 2 lines"],
+			["powershell", "PowerShell", { command: "Write-Host hi" }, "Write-Host hi", "Returned 2 lines"],
+			["edit", "Edit", { path: "a.ts" }, "a.ts", "Updated"],
+			["write", "Write", { path: "a.ts" }, "a.ts", "Written"],
+			["grep", "Grep", { pattern: "two words", path: "src" }, '"two words" in src', "Found 2 lines"],
+			["find", "Find", { pattern: "*.ts" }, "*.ts", "Found 2 lines"],
+			["ls", "List", {}, ".", "Listed 2 lines"],
+		] as const;
+		const { pi, registered } = createMockPi(cases.map(([name]) => name));
+		assert.deepEqual(registerClaudeToolRenderers(pi, "/tmp"), cases.map(([name]) => name));
+		const theme = createMockTheme();
+		const context = { executionStarted: true, isError: false, isPartial: false };
+		for (const [name, label, args, detail, summary] of cases) {
+			const tool = registered.find((entry) => entry.name === name)!.def as ToolRenderers;
+			const call = tool.renderCall!(args, theme, context as never).render(120).join("\n");
+			assert.ok(call.includes(`${label}  ${detail}`), `${name}: ${call}`);
+			assert.ok(!call.includes("offset:"));
+			const output = tool.renderResult!({ content: [{ type: "text", text: "first\n\nlast" }], details: {} },
+				{ expanded: false, isPartial: false }, theme, context as never).render(120).join("\n");
+			assert.ok(output.includes(`Completed · ${summary}`), `${name}: ${output}`);
+		}
+	});
+
+	it("delegates expanded reads and first-block images, but summarizes trailing images", () => {
+		const { pi, registered } = createMockPi(["read"]);
+		registerClaudeToolRenderers(pi, "/tmp");
+		const tool = registered[0].def as ToolRenderers;
+		const native = createReadToolDefinition("/tmp");
+		const theme = createMockTheme();
+		const context = { executionStarted: true, isError: false, isPartial: false, state: {}, showImages: false, args: { path: "a.png" } } as never;
+		const image = { type: "image" as const, data: "", mimeType: "image/png" };
+		const text = { type: "text" as const, text: "image note" };
+		for (const [content, expanded] of [[[text], true], [[image, text], false]] as const) {
+			const result = { content: [...content], details: undefined };
+			const options = { expanded, isPartial: false };
+			assert.deepEqual(tool.renderResult!(result, options, theme, context).render(80),
+				native.renderResult!(result, options, theme, context).render(80));
+		}
+		const trailing = tool.renderResult!({ content: [text, image], details: {} },
+			{ expanded: false, isPartial: false }, theme, context).render(80).join("\n");
+		assert.ok(trailing.includes("Completed · Read 1 line"));
+	});
+
 	it("wraps all 8 builtins including powershell", () => {
 		const { pi, registered } = createMockPi([
 			"read",

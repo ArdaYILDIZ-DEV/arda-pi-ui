@@ -359,6 +359,16 @@ function padOriginal(component: PiTui.Component, base: ToolRenderers, context: R
 	return box;
 }
 
+function builtinSummary(toolName: string, output: string): string {
+	if (toolName === "write") return "Written";
+	if (toolName === "edit") return "Updated";
+	const noun = toolName === "read" ? "Read"
+		: toolName === "bash" || toolName === "powershell" ? "Returned"
+		: toolName === "grep" || toolName === "find" ? "Found"
+		: toolName === "ls" ? "Listed" : "Completed";
+	return lineSummary(noun, output);
+}
+
 function compactToolRenderers(toolName: string, base?: ToolRenderers): ToolRenderers {
 	// Pi passes our last outer component back on every redraw. Native renderers
 	// must instead receive their own previous component, isolated per execution
@@ -421,13 +431,7 @@ function compactToolRenderers(toolName: string, base?: ToolRenderers): ToolRende
 			if (result.content.some((item) => item.type === "image") && !options.expanded) {
 				return new PiTui.Text(theme.fg("dim", "  └ Image result (expand to view)"), outputPadding(context), 0);
 			}
-			const noun = toolName === "read" ? "Read"
-				: toolName === "bash" || toolName === "powershell" ? "Returned"
-				: toolName === "grep" || toolName === "find" ? "Found"
-				: toolName === "ls" ? "Listed" : "Completed";
-			return renderResult(result, options, theme, context, (output) =>
-				toolName === "write" ? "Written" : toolName === "edit" ? "Updated" : lineSummary(noun, output),
-			);
+			return renderResult(result, options, theme, context, (output) => builtinSummary(toolName, output));
 		},
 	};
 }
@@ -451,230 +455,48 @@ export function registerClaudeToolRenderers(
 		return wrapped;
 	}
 	const piOwnedTools = new Set(getWrappableBuiltins(pi));
-
 	const safeCwd = typeof cwd === "string" && cwd ? cwd : process.cwd();
 
-	if (piOwnedTools.has("read")) {
+	for (const name of KNOWN_BUILTINS) {
+		if (!piOwnedTools.has(name)) continue;
 		try {
-			const tool = createReadToolDefinition(safeCwd);
+			const tool = BUILTIN_FACTORIES[name]!(safeCwd);
 			pi.registerTool({
 				...tool,
 				renderShell: "self",
-				renderCall: (args, theme, context) =>
-					renderCall("Read", (args as { path?: string }).path ?? "", theme, context),
+				renderCall(args, theme, context) {
+					const a = args as { path?: string; command?: string; pattern?: string };
+					const detail = name === "grep" || name === "find"
+						? `${quote(a.pattern ?? "")}${a.path ? ` in ${a.path}` : ""}`
+						: name === "bash" || name === "powershell"
+							? a.command ?? ""
+							: a.path ?? (name === "ls" ? "." : "");
+					return renderCall(BUILTIN_LABELS[name]!, detail, theme, context);
+				},
 				renderResult(result, options, theme, context) {
-					if (
-						(options.expanded || result.content[0]?.type === "image") &&
-						tool.renderResult
-					) {
+					// Legacy edit results own the diff even when expanded; errors
+					// must stay in the generic diagnostic view, ahead of the diff.
+					if (name === "edit") {
+						if (context.isError) {
+							return renderResult(result, options, theme, context, () => "Failed");
+						}
+						const diff = (result.details as { diff?: unknown } | undefined)?.diff;
+						if (typeof diff === "string" && diff.trim()) {
+							const args = context.args as { path?: string; file_path?: string } | undefined;
+							return new ToolDiffComponent(diff, args?.path ?? args?.file_path ?? "", theme);
+						}
+					}
+					// Preserve the legacy read contract: only a first-block image
+					// selects the native renderer while collapsed.
+					if ((options.expanded || (name === "read" && result.content[0]?.type === "image")) && tool.renderResult) {
 						return tool.renderResult(result, options, theme, context);
 					}
-					return renderResult(result, options, theme, context, (output) =>
-						lineSummary("Read", output),
-					);
+					return renderResult(result, options, theme, context, (output) => builtinSummary(name, output));
 				},
 			});
-			wrapped.push("read");
+			wrapped.push(name);
 		} catch {
-			/* best-effort: keep original renderer */
-		}
-	}
-
-	if (piOwnedTools.has("bash")) {
-		try {
-			const tool = createBashToolDefinition(safeCwd);
-			pi.registerTool({
-				...tool,
-				renderShell: "self",
-				renderCall: (args, theme, context) =>
-					renderCall(
-						"Bash",
-						(args as { command?: string }).command ?? "",
-						theme,
-						context,
-					),
-				renderResult(result, options, theme, context) {
-					if (options.expanded && tool.renderResult)
-						return tool.renderResult(result, options, theme, context);
-					return renderResult(result, options, theme, context, (output) =>
-						lineSummary("Returned", output),
-					);
-				},
-			});
-			wrapped.push("bash");
-		} catch {
-			/* best-effort */
-		}
-	}
-
-	if (piOwnedTools.has("powershell")) {
-		try {
-			const tool = createPowerShellToolDefinition(safeCwd);
-			pi.registerTool({
-				...tool,
-				renderShell: "self",
-				renderCall: (args, theme, context) =>
-					renderCall(
-						"PowerShell",
-						(args as { command?: string }).command ?? "",
-						theme,
-						context,
-					),
-				renderResult(result, options, theme, context) {
-					if (options.expanded && tool.renderResult)
-						return tool.renderResult(result, options, theme, context);
-					return renderResult(result, options, theme, context, (output) =>
-						lineSummary("Returned", output),
-					);
-				},
-			});
-			wrapped.push("powershell");
-		} catch {
-			/* best-effort */
-		}
-	}
-
-	if (piOwnedTools.has("edit")) {
-		try {
-			const tool = createEditToolDefinition(safeCwd);
-			pi.registerTool({
-				...tool,
-				renderShell: "self",
-				renderCall: (args, theme, context) =>
-					renderCall("Edit", (args as { path?: string }).path ?? "", theme, context),
-				renderResult(result, options, theme, context) {
-					if (context.isError) {
-						return renderResult(result, options, theme, context, () => "Failed");
-					}
-					const diff = (result.details as { diff?: unknown } | undefined)?.diff;
-					if (typeof diff === "string" && diff.trim().length > 0) {
-						const editArgs = context.args as
-							| { path?: string; file_path?: string }
-							| undefined;
-						const path = editArgs?.path ?? editArgs?.file_path ?? "";
-						return new ToolDiffComponent(diff, path, theme);
-					}
-					if (options.expanded && tool.renderResult) {
-						return tool.renderResult(result, options, theme, context);
-					}
-					return renderResult(result, options, theme, context, () => "Updated");
-				},
-			});
-			wrapped.push("edit");
-		} catch {
-			/* best-effort */
-		}
-	}
-
-	if (piOwnedTools.has("write")) {
-		try {
-			const tool = createWriteToolDefinition(safeCwd);
-			pi.registerTool({
-				...tool,
-				renderShell: "self",
-				renderCall: (args, theme, context) =>
-					renderCall(
-						"Write",
-						(args as { path?: string }).path ?? "",
-						theme,
-						context,
-					),
-				renderResult(result, options, theme, context) {
-					if (options.expanded && tool.renderResult)
-						return tool.renderResult(result, options, theme, context);
-					return renderResult(result, options, theme, context, () => "Written");
-				},
-			});
-			wrapped.push("write");
-		} catch {
-			/* best-effort */
-		}
-	}
-
-	if (piOwnedTools.has("grep")) {
-		try {
-			const tool = createGrepToolDefinition(safeCwd);
-			pi.registerTool({
-				...tool,
-				renderShell: "self",
-				renderCall: (args, theme, context) => {
-					const a = args as { pattern?: string; path?: string };
-					const location = a.path ? ` in ${a.path}` : "";
-					return renderCall(
-						"Grep",
-						`${quote(a.pattern ?? "")}${location}`,
-						theme,
-						context,
-					);
-				},
-				renderResult(result, options, theme, context) {
-					if (options.expanded && tool.renderResult)
-						return tool.renderResult(result, options, theme, context);
-					return renderResult(result, options, theme, context, (output) =>
-						lineSummary("Found", output),
-					);
-				},
-			});
-			wrapped.push("grep");
-		} catch {
-			/* best-effort */
-		}
-	}
-
-	if (piOwnedTools.has("find")) {
-		try {
-			const tool = createFindToolDefinition(safeCwd);
-			pi.registerTool({
-				...tool,
-				renderShell: "self",
-				renderCall: (args, theme, context) => {
-					const a = args as { pattern?: string; path?: string };
-					const location = a.path ? ` in ${a.path}` : "";
-					return renderCall(
-						"Find",
-						`${quote(a.pattern ?? "")}${location}`,
-						theme,
-						context,
-					);
-				},
-				renderResult(result, options, theme, context) {
-					if (options.expanded && tool.renderResult)
-						return tool.renderResult(result, options, theme, context);
-					return renderResult(result, options, theme, context, (output) =>
-						lineSummary("Found", output),
-					);
-				},
-			});
-			wrapped.push("find");
-		} catch {
-			/* best-effort */
-		}
-	}
-
-	if (piOwnedTools.has("ls")) {
-		try {
-			const tool = createLsToolDefinition(safeCwd);
-			pi.registerTool({
-				...tool,
-				renderShell: "self",
-				renderCall: (args, theme, context) =>
-					renderCall(
-						"List",
-						(args as { path?: string }).path ?? ".",
-						theme,
-						context,
-					),
-				renderResult(result, options, theme, context) {
-					if (options.expanded && tool.renderResult)
-						return tool.renderResult(result, options, theme, context);
-					return renderResult(result, options, theme, context, (output) =>
-						lineSummary("Listed", output),
-					);
-				},
-			});
-			wrapped.push("ls");
-		} catch {
-			/* best-effort */
+			/* best-effort: keep the original definition and continue */
 		}
 	}
 

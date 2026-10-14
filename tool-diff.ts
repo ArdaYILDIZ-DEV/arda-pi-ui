@@ -396,12 +396,16 @@ export function renderToolDiffLines(
 				? " ".repeat(maxNumWidth)
 				: String(line.lineNum).padStart(maxNumWidth, " ");
 
-		if (line.type === "added") {
-			const baseBg = bgAnsi(colors.diffAddedBg, colorMode);
-			const wordBg = bgAnsi(colors.diffAddedWord, colorMode);
-			const gutterFg = tokenFg("toolDiffAdded", fgAnsi(colors.diffAddedGutter, colorMode));
+		if (line.type === "added" || line.type === "removed") {
+			const isAdded = line.type === "added";
+			const sign = isAdded ? "+" : "-";
+			const baseBg = bgAnsi(isAdded ? colors.diffAddedBg : colors.diffRemovedBg, colorMode);
+			const wordBg = bgAnsi(isAdded ? colors.diffAddedWord : colors.diffRemovedWord, colorMode);
+			const gutterFg = isAdded
+				? tokenFg("toolDiffAdded", fgAnsi(colors.diffAddedGutter, colorMode))
+				: tokenFg("toolDiffRemoved", fgAnsi(colors.diffRemovedGutter, colorMode));
 			const code = line.wordParts
-				? applyIntraLineBg(line.highlighted, line.wordParts, true, baseBg, wordBg)
+				? applyIntraLineBg(line.highlighted, line.wordParts, isAdded, baseBg, wordBg)
 				: line.highlighted;
 
 			const wrapped =
@@ -412,34 +416,10 @@ export function renderToolDiffLines(
 			for (let r = 0; r < wrapped.length; r++) {
 				const g =
 					r === 0
-						? `${baseBg}${gutterFg}${paddedNum} + ${codeFg}`
+						? `${baseBg}${gutterFg}${paddedNum} ${sign} ${codeFg}`
 						: `${baseBg}${" ".repeat(gutterWidth)}`;
 				const row = g + wrapped[r]!;
-				const visLen = visibleWidth(row);
-				const pad = Math.max(0, targetWidth - visLen);
-				output.push(`${row}${baseBg}${" ".repeat(pad)}${RESET}`);
-			}
-		} else if (line.type === "removed") {
-			const baseBg = bgAnsi(colors.diffRemovedBg, colorMode);
-			const wordBg = bgAnsi(colors.diffRemovedWord, colorMode);
-			const gutterFg = tokenFg("toolDiffRemoved", fgAnsi(colors.diffRemovedGutter, colorMode));
-			const code = line.wordParts
-				? applyIntraLineBg(line.highlighted, line.wordParts, false, baseBg, wordBg)
-				: line.highlighted;
-
-			const wrapped =
-				line.cleanContent.length > 0
-					? wrapTextWithAnsi(baseBg + codeFg + code, availCodeWidth)
-					: [""];
-
-			for (let r = 0; r < wrapped.length; r++) {
-				const g =
-					r === 0
-						? `${baseBg}${gutterFg}${paddedNum} - ${codeFg}`
-						: `${baseBg}${" ".repeat(gutterWidth)}`;
-				const row = g + wrapped[r]!;
-				const visLen = visibleWidth(row);
-				const pad = Math.max(0, targetWidth - visLen);
+				const pad = Math.max(0, targetWidth - visibleWidth(row));
 				output.push(`${row}${baseBg}${" ".repeat(pad)}${RESET}`);
 			}
 		} else if (line.type === "context") {
