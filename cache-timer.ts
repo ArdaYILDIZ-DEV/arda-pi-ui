@@ -1,7 +1,7 @@
 /**
- * Local cache-activity reminder with audio milestones and a five-minute default.
- * The footer owns its presentation; standalone registration retains the widget.
- * Elapsed local activity is not proof of any provider's cache-retention policy.
+ * Recorded provider cache usage and qualified request-age observations.
+ * The footer owns presentation; standalone callers retain a local reminder.
+ * Neither request age nor a requested lifetime is proof of a live server cache.
  */
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -30,6 +30,7 @@ import {
 	stripAnsi,
 } from "./palette.ts";
 import { notifySafely } from "./pi-compat.ts";
+import { DEFAULT_UNKNOWN_CACHE_TTL_MS, PromptCacheTracker, type CacheEntry, type CacheModel, type PromptCacheObservation } from "./prompt-cache.ts";
 
 let truncationWarningLogged = false;
 
@@ -64,7 +65,9 @@ function truncateToWidth(text: string, width: number): string {
 	return output;
 }
 
-export const DEFAULT_CACHE_TTL_MS = 300_000; // 5 minutes = 300 seconds
+export const DEFAULT_CACHE_TTL_MS = DEFAULT_UNKNOWN_CACHE_TTL_MS;
+/** Change one tuple for every provider/window; ratios must increase strictly within (0, 1). */
+export const DEFAULT_CACHE_SOUND_RATIOS: readonly [number, number, number] = [0.5, 0.8, 0.9];
 
 // Widget render failures tolerated in a row before the 1s loop stops itself.
 // A single transient UI error (teardown race) must not freeze the widget or
@@ -88,31 +91,31 @@ export interface CacheSoundMilestone {
 
 /**
  * Cache TTL audio warning milestones:
- * - 3. dakika (180s): 3.mp3 (1 kez)
+ * - Sürenin yarısı (5dk için 150s): 3.mp3 (1 kez)
  * - 4. dakika (240s): 4.mp3 (1 kez)
  * - 4.30. dakika (270s): 4.mp3 (2 kez)
  */
 export const CACHE_SOUND_MILESTONES: readonly CacheSoundMilestone[] = [
 	{
 		id: "m3",
-		elapsedMs: 180_000,
+		elapsedMs: DEFAULT_CACHE_TTL_MS * DEFAULT_CACHE_SOUND_RATIOS[0],
 		soundFile: "3.mp3",
 		repeat: 1,
-		description: "3. dakika uyarısı",
+		description: "Sürenin yarısı uyarısı",
 	},
 	{
 		id: "m4",
-		elapsedMs: 240_000,
+		elapsedMs: DEFAULT_CACHE_TTL_MS * DEFAULT_CACHE_SOUND_RATIOS[1],
 		soundFile: "4.mp3",
 		repeat: 1,
-		description: "4. dakika uyarısı",
+		description: "%80 uyarısı",
 	},
 	{
 		id: "m4_30",
-		elapsedMs: 270_000,
+		elapsedMs: DEFAULT_CACHE_TTL_MS * DEFAULT_CACHE_SOUND_RATIOS[2],
 		soundFile: "4.mp3",
 		repeat: 2,
-		description: "4.30. dakika uyarısı (2 kez)",
+		description: "%90 uyarısı (2 kez)",
 	},
 ];
 
@@ -413,6 +416,8 @@ export interface CacheTimerFrameState {
 	readonly hasContext: boolean;
 	readonly isProcessing: boolean;
 	readonly gitSummary?: string | null;
+	/** Already qualified provider observation; omitted for the standalone local reminder. */
+	readonly badgeText?: string;
 }
 
 export interface CacheTimerPaint {
@@ -452,7 +457,7 @@ export function buildCacheTimerLine(
 	const availableWidth = Math.max(1, cols - 2);
 
 	const rawGit =
-		typeof state.gitSummary === "string" ? state.gitSummary.trim() : "";
+		typeof state.gitSummary === "string" ? sanitizeControlChars(stripAnsi(state.gitSummary)).trim() : "";
 	const hasGit = rawGit.length > 0;
 
 	// Case 1: No context yet (new session before first request), but gitSummary is present
@@ -483,12 +488,16 @@ export function buildCacheTimerLine(
 	const elapsedText = formatCacheElapsed(effectiveElapsed);
 
 	const paintElapsed = (text: string) => paint.ttlColor ? paint.ttlColor(text, ratio) : paint.colorize(text, color);
-	const fullBadge = `${paintElapsed(elapsedText)} ${paint.dim("/")} ${paint.red("5dk")}`;
-	const rawBadge = `${elapsedText} / 5dk`;
+	const ttlText = formatCacheElapsed(ttlMs).replace(" 0sn", "");
+	const badgeText = typeof state.badgeText === "string" ? sanitizeControlChars(stripAnsi(state.badgeText)) : undefined;
+	const rawBadge = badgeText ?? `${elapsedText} / ${ttlText}`;
+	const fullBadge = badgeText !== undefined ? paint.dim(badgeText)
+		: `${paintElapsed(elapsedText)} ${paint.dim("/")} ${paint.red(ttlText)}`;
 	const badgeWidth = visibleWidth(rawBadge);
 
 	// Progressive fallback if available width cannot fit "XXsn / 5dk"
 	if (availableWidth < badgeWidth) {
+		if (badgeText !== undefined) return paint.dim(truncateToWidth(badgeText, availableWidth));
 		const shortWidth = visibleWidth(elapsedText);
 		if (availableWidth >= shortWidth) {
 			const pad = Math.max(0, availableWidth - shortWidth);
@@ -522,13 +531,24 @@ export function buildCacheTimerLine(
 // Controller & Lifecycle Management
 // ---------------------------------------------------------------------------
 
-export type UiCtx = Pick<ExtensionContext, "hasUI" | "ui">;
+export type UiCtx = Pick<ExtensionContext, "hasUI" | "ui"> & {
+	readonly model?: CacheModel;
+	readonly sessionManager?: SessionManagerLike;
+};
 
 export interface SessionManagerLike {
-	getEntries?(): readonly {
-		readonly type: string;
-		readonly timestamp?: string;
-	}[];
+	getEntries?(): readonly CacheEntry[];
+	getBranch?(): readonly CacheEntry[];
+	getSessionId?(): string;
+	getLeafId?(): string | null;
+}
+
+/** Age since a cache-bearing request, compared with a best-effort window, not expiry. */
+export function formatPromptCacheObservation(observation: PromptCacheObservation): string {
+	if (observation.timestamp === undefined) return "";
+	const age = formatCacheElapsed(Math.max(0, Date.now() - observation.timestamp));
+	const label = observation.source === "warm" ? "warm age ~" : "age ";
+	return `${label}${age}${observation.ttlMs ? ` / ~${formatCacheElapsed(observation.ttlMs).replace(" 0sn", "")}${observation.ttlSource === "fallback" ? "*" : ""}` : " / ttl ?"}`;
 }
 
 export interface CacheTimerStateSnapshot {
@@ -544,6 +564,7 @@ export interface CacheTimerStateSnapshot {
 
 export interface CacheTimerOptions {
 	readonly ttlMs?: number;
+	readonly soundMilestoneRatios?: readonly [number, number, number];
 	readonly soundEnabled?: boolean;
 	readonly soundPlayer?: SoundPlayerFn;
 	readonly gitInfoProvider?: () => string | null;
@@ -562,8 +583,11 @@ export class CacheTimerController {
 	private cachedTheme: Theme | undefined;
 	private cachedPaint: CacheTimerPaint | null = null;
 	private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS;
+	private readonly soundMilestoneRatios: readonly [number, number, number];
 	private lastCtx: UiCtx | null = null;
 	private footerRenderer: (() => void) | null = null;
+	private readonly promptCache = new PromptCacheTracker();
+	private observationCache?: { manager: SessionManagerLike; key: string; value: PromptCacheObservation };
 
 	constructor(
 		ttlMsOrOptions?: number | CacheTimerOptions,
@@ -577,6 +601,10 @@ export class CacheTimerController {
 			typeof ttlMsOrOptions === "number" ? ttlMsOrOptions : opts.ttlMs;
 		this.ttlMs =
 			typeof rawTtl === "number" && Number.isFinite(rawTtl) && rawTtl > 0 ? rawTtl : DEFAULT_CACHE_TTL_MS;
+		const ratios = opts.soundMilestoneRatios;
+		this.soundMilestoneRatios = ratios?.length === 3 && ratios.every((ratio, index) =>
+			Number.isFinite(ratio) && ratio > 0 && ratio < 1 && (index === 0 || ratio > ratios[index - 1]),
+		) ? [...ratios] : DEFAULT_CACHE_SOUND_RATIOS;
 		this.isSoundEnabled = opts.soundEnabled ?? true;
 		if (typeof opts.soundPlayer === "function") {
 			this.soundPlayer = opts.soundPlayer;
@@ -627,17 +655,17 @@ export class CacheTimerController {
 		this.firedMilestones.clear();
 	}
 
-	public seedMilestones(initialElapsedMs: number): void {
+	public seedMilestones(initialElapsedMs: number, ttlMs = this.ttlMs): void {
 		this.firedMilestones.clear();
 		if (!Number.isFinite(initialElapsedMs) || initialElapsedMs <= 0) return;
-		for (const milestone of CACHE_SOUND_MILESTONES) {
-			if (initialElapsedMs >= milestone.elapsedMs) {
+		for (const [index, milestone] of CACHE_SOUND_MILESTONES.entries()) {
+			if (initialElapsedMs >= ttlMs * this.soundMilestoneRatios[index]) {
 				this.firedMilestones.add(milestone.id);
 			}
 		}
 	}
 
-	public checkSoundMilestones(elapsedMs: number): void {
+	public checkSoundMilestones(elapsedMs: number, ttlMs = this.ttlMs): void {
 		if (
 			!this.isSoundEnabled ||
 			this.isProcessing ||
@@ -646,9 +674,9 @@ export class CacheTimerController {
 			return;
 		}
 
-		for (const milestone of CACHE_SOUND_MILESTONES) {
+		for (const [index, milestone] of CACHE_SOUND_MILESTONES.entries()) {
 			if (
-				elapsedMs >= milestone.elapsedMs &&
+				elapsedMs >= ttlMs * this.soundMilestoneRatios[index] &&
 				!this.firedMilestones.has(milestone.id)
 			) {
 				this.firedMilestones.add(milestone.id);
@@ -721,20 +749,41 @@ export class CacheTimerController {
 		};
 	}
 
+	public getCacheObservation(ctx: UiCtx | null = this.lastCtx): PromptCacheObservation {
+		const manager = ctx?.sessionManager;
+		const model = ctx?.model;
+		if (!manager?.getSessionId || !manager.getLeafId) return this.promptCache.observe(model, manager?.getBranch?.());
+		const key = `${manager.getSessionId()}:${manager.getLeafId()}:${model?.provider}:${model?.id}:${model?.api}:${model?.promptCache?.short}:${model?.promptCache?.long}`;
+		if (this.observationCache?.manager === manager && this.observationCache.key === key) return this.observationCache.value;
+		const value = this.promptCache.observe(model, manager.getBranch?.());
+		this.observationCache = { manager, key, value };
+		return value;
+	}
+
 	public getStatusSummary(): string {
+		if (this.lastCtx?.model) {
+			const observation = this.getCacheObservation();
+			const usage = observation.usage;
+			const actual = observation.readPercent === undefined ? "Cache read: bilinmiyor."
+				: `Son istek cache read: %${Math.round(observation.readPercent)} (${usage!.cacheRead} read, ${usage!.cacheWrite} write, ${usage!.input} uncached token).`;
+			const age = formatPromptCacheObservation(observation);
+			const warm = observation.warmUsage;
+			const warmText = warm ? `Pi warm: ${warm.cacheRead} read, ${warm.cacheWrite} write token. ` : "";
+			return `${actual} ${warmText}${age ? `${age}. ` : ""}${observation.reason} TTL, erişilebilir bir sunucu cache durumu değil; istek/katalog tahminidir. Ek istek gönderilmez. Keep-alive için Pi /session ve cacheWarming ayarını kullan. Sesli uyarı: ${this.isSoundEnabled ? "açık" : "kapalı"} (eşikler: ${this.soundMilestoneRatios.map((ratio) => `%${Math.round(ratio * 100)}`).join(", ")}; * = bilinmeyen ömür için 5dk varsayılan).`;
+		}
 		const soundText = this.isSoundEnabled
-			? "Sesli uyarı: açık (3dk, 4dk, 4.30dk)"
+			? `Sesli uyarı: açık (${this.soundMilestoneRatios.map((ratio) => `%${Math.round(ratio * 100)}`).join(", ")})`
 			: "Sesli uyarı: kapalı";
+		const ttlText = formatCacheElapsed(this.ttlMs);
+		const note = "Bu yerel hatırlatıcı sağlayıcının cache durumunu göstermez.";
+		if (this.isProcessing) return `Önbellek: İşleniyor (0sn / ${ttlText}). ${note} ${soundText}.`;
 		if (this.lastContextTimestamp === null) {
 			return `Önbellek: Henüz istek gönderilmedi (yeni oturum). ${soundText}.`;
 		}
 		const elapsedMs = Math.max(0, Date.now() - this.lastContextTimestamp);
 		const elapsedText = formatCacheElapsed(elapsedMs);
 		const remainingText = formatCacheRemaining(elapsedMs, this.ttlMs);
-		if (elapsedMs >= this.ttlMs) {
-			return `Önbellek: 5dk+ doldu (${elapsedText} geçti). Cache miss riski yüksek. ${soundText}.`;
-		}
-		return `Önbellek: ${elapsedText} / 5dk geçti (kalan: ${remainingText}). Cache hit aktif. ${soundText}.`;
+		return `Önbellek: ${elapsedText} / ${ttlText} geçti (${elapsedMs >= this.ttlMs ? "hatırlatma süresi doldu" : `kalan: ${remainingText}`}). ${note} ${soundText}.`;
 	}
 
 	public paintFor(theme?: Theme): CacheTimerPaint {
@@ -767,8 +816,14 @@ export class CacheTimerController {
 	public startLoop(ctx: UiCtx): void {
 		this.lastCtx = ctx;
 		this.consecutiveWidgetErrors = 0;
+		if (!ctx.hasUI) {
+			this.stopLoop();
+			return;
+		}
 		if (this.timer !== null) return;
-		this.timer = setInterval(() => this.repaint(ctx), 1000);
+		this.timer = setInterval(() => {
+			if (this.lastCtx) this.repaint(this.lastCtx);
+		}, 1000);
 		this.timer.unref?.();
 	}
 
@@ -791,7 +846,13 @@ export class CacheTimerController {
 		// Sound milestones must fire even if widget rendering fails below:
 		// a broken widget frame must never silence the audio warnings.
 		try {
-			this.checkSoundMilestones(elapsedMs);
+			if (ctx.model) {
+				const observation = this.getCacheObservation(ctx);
+				if (observation.timestamp !== undefined && observation.ttlMs) {
+					const age = Math.max(0, Date.now() - observation.timestamp);
+					if (age < observation.ttlMs) this.checkSoundMilestones(age, observation.ttlMs);
+				}
+			} else this.checkSoundMilestones(elapsedMs);
 		} catch {
 			/* best-effort sound notification */
 		}
@@ -821,8 +882,10 @@ export class CacheTimerController {
 					? process.stdout.columns
 					: 80;
 
+			const observation = ctx.model ? this.getCacheObservation(ctx) : undefined;
 			const line = buildCacheTimerLine(
 				{
+					badgeText: observation ? (formatPromptCacheObservation(observation) || "cache ?") : undefined,
 					elapsedMs,
 					ttlMs: this.ttlMs,
 					columns,
@@ -857,17 +920,20 @@ export class CacheTimerController {
 		this.lastCtx = ctx;
 		this.isProcessing = false;
 
-		// Scan existing session history to seed the timer if resuming a session
+		this.promptCache.reset();
+		this.observationCache = undefined;
+		// Only provider assistant requests on the active branch are activity evidence.
 		let foundTimestamp: number | null = null;
 		if (ctx.sessionManager?.getEntries) {
 			try {
-				const entries = ctx.sessionManager.getEntries();
+				const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries();
 				if (Array.isArray(entries)) {
 					for (let i = entries.length - 1; i >= 0; i--) {
 						const e = entries[i];
-						if (e && e.type === "message" && typeof e.timestamp === "string") {
-							const parsed = Date.parse(e.timestamp);
-							if (Number.isFinite(parsed) && parsed > 0) {
+						if (e?.type === "compaction") break;
+						if (e?.type === "message" && e.message?.role === "assistant") {
+							const parsed = e.message.timestamp ?? Date.parse(e.timestamp ?? "");
+							if (Number.isFinite(parsed) && parsed > 0 && parsed <= Date.now()) {
 								foundTimestamp = parsed;
 								break;
 							}
@@ -908,45 +974,48 @@ export class CacheTimerController {
 	public handleAgentStart(ctx: UiCtx): void {
 		this.lastCtx = ctx;
 		this.isProcessing = true;
-		this.resetMilestones();
 		this.startLoop(ctx);
 		this.repaint(ctx);
 	}
 
-	public handleBeforeProviderRequest(ctx: UiCtx): void {
+	public handleBeforeProviderRequest(ctx: UiCtx, payload?: unknown): void {
 		this.lastCtx = ctx;
+		this.promptCache.request(ctx.model, payload);
 		this.lastContextTimestamp = Date.now();
 		this.isProcessing = true;
-		this.resetMilestones();
+		if (!ctx.model) this.resetMilestones();
 		this.repaint(ctx);
 	}
 
 	public handleMessageEnd(event: MessageEndEvent, ctx: UiCtx): void {
-		if (event?.message?.role === "assistant") {
-			this.lastContextTimestamp = Date.now();
-			this.resetMilestones();
-		}
+		const previous = this.promptCache.observe(ctx.model).timestamp;
+		this.promptCache.message(event.message);
+		this.observationCache = undefined;
+		const current = this.promptCache.observe(ctx.model).timestamp;
+		if (current !== undefined && current !== previous) this.resetMilestones();
 		this.lastCtx = ctx;
+		this.repaint(ctx);
 	}
 
 	public handleTurnEnd(_event: TurnEndEvent, ctx: UiCtx): void {
-		this.lastContextTimestamp = Date.now();
-		this.resetMilestones();
 		this.lastCtx = ctx;
 	}
 
 	public handleAgentSettled(ctx: UiCtx): void {
+		this.promptCache.settled();
 		this.lastCtx = ctx;
 		this.isProcessing = false;
-		this.lastContextTimestamp = Date.now();
-		this.resetMilestones();
 		this.startLoop(ctx);
 		this.repaint(ctx);
 	}
 
 	public handleSessionShutdown(ctx?: UiCtx): void {
 		this.stopLoop();
+		this.promptCache.reset();
+		this.observationCache = undefined;
 		const targetCtx = ctx ?? this.lastCtx;
+		this.lastCtx = null;
+		this.footerRenderer = null;
 		if (targetCtx?.hasUI && targetCtx.ui?.setWidget) {
 			try {
 				targetCtx.ui.setWidget("cache-timer", undefined, {
@@ -973,16 +1042,20 @@ export function registerCacheTimer(
 	const controller = new CacheTimerController(options);
 
 	pi.on("session_start", async (_event, ctx) => {
-		controller.handleSessionStart(ctx as any);
+		controller.handleSessionStart(ctx);
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
 		controller.handleAgentStart(ctx);
 	});
 
-	pi.on("before_provider_request", async (_event, ctx) => {
-		controller.handleBeforeProviderRequest(ctx);
+	pi.on("before_provider_request", async (event, ctx) => {
+		controller.handleBeforeProviderRequest(ctx, event.payload);
 	});
+
+	pi.on("model_select", async (_event, ctx) => controller.handleSessionStart(ctx));
+	pi.on("session_compact", async (_event, ctx) => controller.handleSessionStart(ctx));
+	pi.on("session_tree", async (_event, ctx) => controller.handleSessionStart(ctx));
 
 	pi.on("message_end", async (event, ctx) => {
 		controller.handleMessageEnd(event, ctx);
@@ -1003,7 +1076,7 @@ export function registerCacheTimer(
 	// Register /cache slash command for interactive queries & toggling
 	pi.registerCommand("cache", {
 		description:
-			"Prompt cache TTL sayacını ve sesli uyarıları kontrol eder (/cache toggle, /cache sound, /cache sound test)",
+			"Raporlanan cache kullanımı ve tahmini yaş bilgisi (/cache toggle, /cache sound, /cache sound test)",
 		handler: async (args, ctx) => {
 			const clean = sanitizeControlChars(stripAnsi(args)).trim().toLowerCase();
 			if (clean === "toggle") {

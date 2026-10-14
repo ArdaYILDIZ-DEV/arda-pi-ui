@@ -10,11 +10,11 @@
   "types": "index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/**/*.test.ts"
+    "test": "node --test --test-concurrency=1 tests/**/*.test.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^1.1.0",
-    "@earendil-works/pi-tui": "^1.1.0"
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-tui": "^1.2.0"
   },
   "pi": {
     "extensions": [
@@ -22,7 +22,7 @@
     ]
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-coding-agent": "1.2.0",
     "@types/node": "^26.4.0",
     "typescript": "^7.0.2"
   }

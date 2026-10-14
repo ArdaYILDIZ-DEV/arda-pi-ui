@@ -362,6 +362,58 @@ describe("CacheTimerController lifecycle", () => {
 		};
 	}
 
+	it("does not create a background interval in headless mode", () => {
+		const controller = new CacheTimerController({ soundEnabled: false });
+		try {
+			controller.handleAgentStart({ hasUI: false } as UiCtx);
+			assert.equal(controller.getState().hasTimer, false);
+			controller.handleAgentSettled({ hasUI: false } as UiCtx);
+			assert.equal(controller.getState().hasTimer, false);
+		} finally {
+			controller.dispose();
+		}
+	});
+
+	it("ticks against the current session UI rather than the context captured by the first interval", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		const controller = new CacheTimerController({ soundEnabled: false });
+		const first = createMockUi();
+		const second = createMockUi();
+		try {
+			controller.handleAgentStart(first.ctx);
+			controller.handleBeforeProviderRequest(first.ctx);
+			controller.handleAgentSettled(second.ctx);
+			first.widgets.clear();
+			second.widgets.clear();
+			t.mock.timers.tick(1000);
+			assert.equal(first.widgets.size, 0);
+			assert.equal(second.widgets.has("cache-timer"), true);
+		} finally {
+			controller.dispose();
+		}
+	});
+
+	it("reports a local reminder with the configured TTL, not a provider cache guarantee", (t) => {
+		t.mock.method(Date, "now", () => 1_000_000);
+		const controller = new CacheTimerController({ ttlMs: 60_000, soundEnabled: false });
+		try {
+			controller.setLastContextTimestamp(970_000);
+			const active = controller.getStatusSummary();
+			assert.ok(active.includes("1dk"));
+			assert.ok(active.includes("yerel"));
+			assert.ok(!active.includes("Cache hit aktif"));
+			controller.setLastContextTimestamp(900_000);
+			const expired = controller.getStatusSummary();
+			assert.ok(expired.includes("1dk"));
+			assert.ok(!expired.includes("5dk"));
+			assert.ok(!expired.includes("Cache miss riski"));
+			controller.handleAgentStart({ hasUI: false } as UiCtx);
+			assert.ok(controller.getStatusSummary().includes("İşleniyor"));
+		} finally {
+			controller.dispose();
+		}
+	});
+
 	it("rejects non-finite and non-positive TTLs consistently with the pure helpers", () => {
 		for (const ttlMs of [Infinity, -Infinity, NaN, 0, -1]) {
 			const controller = new CacheTimerController({ ttlMs, soundEnabled: false });
@@ -394,7 +446,7 @@ describe("CacheTimerController lifecycle", () => {
 		const sampleTime = "2026-09-01T12:00:00.000Z";
 		const entries = [
 			{ type: "session", timestamp: "2026-09-01T11:59:00.000Z" },
-			{ type: "message", timestamp: sampleTime },
+			{ type: "message", timestamp: sampleTime, message: { role: "assistant" } },
 		];
 		controller.handleSessionStart({
 			...mock.ctx,
@@ -457,7 +509,7 @@ describe("CacheTimerController lifecycle", () => {
 			...mock.ctx,
 			sessionManager: {
 				getEntries: () => [
-					{ type: "message", timestamp: new Date().toISOString() },
+					{ type: "message", timestamp: new Date().toISOString(), message: { role: "assistant" } },
 				],
 			},
 		});
@@ -484,7 +536,7 @@ describe("CacheTimerController lifecycle", () => {
 			...mock.ctx,
 			sessionManager: {
 				getEntries: () => [
-					{ type: "message", timestamp: new Date().toISOString() },
+					{ type: "message", timestamp: new Date().toISOString(), message: { role: "assistant" } },
 				],
 			},
 		});
@@ -587,8 +639,8 @@ describe("Cache audio warning milestones & playback", () => {
 
 	it("defines correct milestone times and repeats", () => {
 		assert.equal(CACHE_SOUND_MILESTONES.length, 3);
-		// 3. dakika: 180s, 3.mp3, 1 kez
-		assert.equal(CACHE_SOUND_MILESTONES[0]!.elapsedMs, 180_000);
+		// Half of five minutes: 150s, 3.mp3, once
+		assert.equal(CACHE_SOUND_MILESTONES[0]!.elapsedMs, 150_000);
 		assert.equal(CACHE_SOUND_MILESTONES[0]!.soundFile, "3.mp3");
 		assert.equal(CACHE_SOUND_MILESTONES[0]!.repeat, 1);
 
@@ -603,7 +655,7 @@ describe("Cache audio warning milestones & playback", () => {
 		assert.equal(CACHE_SOUND_MILESTONES[2]!.repeat, 2);
 	});
 
-	it("triggers 3m (once), 4m (once), and 4.30m (twice) sequentially and idempotently", () => {
+	it("triggers 2.30m (once), 4m (once), and 4.30m (twice) sequentially and idempotently", () => {
 		const played: { file: string; repeat: number }[] = [];
 		const controller = new CacheTimerController(300_000, {
 			soundPlayer: (file, repeat = 1) => {
@@ -614,18 +666,18 @@ describe("Cache audio warning milestones & playback", () => {
 		const now = 1_000_000_000;
 		controller.setLastContextTimestamp(now);
 
-		// At 2m 59s (179_000 ms) -> No sound
-		controller.checkSoundMilestones(179_000);
+		// At 2m 29s -> No sound
+		controller.checkSoundMilestones(149_000);
 		assert.equal(played.length, 0);
 
-		// At 3m 00s (180_000 ms) -> 3.mp3 plays once
-		controller.checkSoundMilestones(180_000);
+		// At 2m 30s -> 3.mp3 plays once
+		controller.checkSoundMilestones(150_000);
 		assert.equal(played.length, 1);
 		assert.ok(played[0]!.file.endsWith("3.mp3"));
 		assert.equal(played[0]!.repeat, 1);
 
-		// At 3m 01s (181_000 ms) -> Still 1 play (no duplicate trigger)
-		controller.checkSoundMilestones(181_000);
+		// At 2m 31s -> Still 1 play (no duplicate trigger)
+		controller.checkSoundMilestones(151_000);
 		assert.equal(played.length, 1);
 
 		// At 3m 59s (239_000 ms) -> No additional sound
@@ -698,7 +750,7 @@ describe("Cache audio warning milestones & playback", () => {
 		controller.handleSessionStart({
 			...mock.ctx,
 			sessionManager: {
-				getEntries: () => [{ type: "message", timestamp: sixMinutesAgo }],
+				getEntries: () => [{ type: "message", timestamp: sixMinutesAgo, message: { role: "assistant" } }],
 			},
 		});
 
@@ -713,7 +765,7 @@ describe("Cache audio warning milestones & playback", () => {
 		controller.dispose();
 	});
 
-	it("resets milestones when a new turn ends and settles", () => {
+	it("resets local reminder milestones only when a provider request starts", () => {
 		const played: { file: string; repeat: number }[] = [];
 		const controller = new CacheTimerController(300_000, {
 			soundPlayer: (file, repeat = 1) => played.push({ file, repeat }),
@@ -724,10 +776,11 @@ describe("Cache audio warning milestones & playback", () => {
 		controller.checkSoundMilestones(180_000);
 		assert.equal(played.length, 1);
 
-		// Agent settles after a new turn
 		controller.handleAgentSettled(mock.ctx);
-
-		// In the new turn, reaching 180s plays sound again
+		controller.checkSoundMilestones(180_000);
+		assert.equal(played.length, 1, "settlement is not cache activity");
+		controller.handleBeforeProviderRequest(mock.ctx);
+		controller.handleAgentSettled(mock.ctx);
 		controller.checkSoundMilestones(180_000);
 		assert.equal(played.length, 2);
 

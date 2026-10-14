@@ -15,6 +15,7 @@ export {
 	registerCacheTimer,
 	CacheTimerController,
 	CACHE_SOUND_MILESTONES,
+	DEFAULT_CACHE_SOUND_RATIOS,
 	playAudio,
 	resolveSoundPath,
 	buildCacheTimerLine,

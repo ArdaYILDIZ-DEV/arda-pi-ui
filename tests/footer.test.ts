@@ -43,7 +43,7 @@ function mountFooter(entries: unknown[], branch = "main", git?: GitInfoControlle
 describe("minimal footer", () => {
 	it("orders model, folder, git, context, cache and TTL on one line", () => {
 		assert.deepEqual(buildFooterLines(state, 160, paint), [
-			"Grok 4.7 (low) | pi-ter-ws | main +5 | 75.5k / 500k | cache 78% | ttl 1dk 47sn / 5dk",
+			"Grok 4.7 (low) | pi-ter-ws | main +5 | 75.5k / 500k | cache read 78% | ttl 1dk 47sn / 5dk",
 		]);
 	});
 
@@ -57,7 +57,7 @@ describe("minimal footer", () => {
 		const colorAt = (elapsedMs: number): number[] => {
 			cache.setLastContextTimestamp(now - elapsedMs);
 			const row = component.render(160)[0];
-			const match = row.match(/\x1b\[38;2;(\d+);(\d+);(\d+)mttl /);
+			const match = row.match(/\x1b\[38;2;(\d+);(\d+);(\d+)midle /);
 			assert.ok(match, `TTL must have an RGB color at ${elapsedMs}ms`);
 			return match.slice(1).map(Number);
 		};
@@ -88,11 +88,11 @@ describe("minimal footer", () => {
 		}, cache);
 		try {
 			cache.setLastContextTimestamp(820_000);
-			assert.ok(component.render(160)[0].includes("\x1b[38;2;205;130;0mttl "));
+			assert.ok(component.render(160)[0].includes("\x1b[38;2;205;130;0midle "));
 			cache.setLastContextTimestamp(700_000);
-			assert.ok(component.render(160)[0].includes("\x1b[38;2;105;15;15mttl "));
+			assert.ok(component.render(160)[0].includes("\x1b[38;2;105;15;15midle "));
 			mode = "256color";
-			assert.match(component.render(160)[0], /\x1b\[38;5;\d+mttl /);
+			assert.match(component.render(160)[0], /\x1b\[38;5;\d+midle /);
 		} finally {
 			component.dispose();
 			cache.dispose();
@@ -109,7 +109,7 @@ describe("minimal footer", () => {
 		try {
 			cache.handleAgentStart({ hasUI: false } as Parameters<CacheTimerController["handleAgentStart"]>[0]);
 			const row = component.render(160)[0];
-			assert.ok(row.includes("\x1b[38;2;78;186;101mttl 0sn / 5dk"));
+			assert.ok(row.includes("\x1b[38;2;78;186;101midle 0sn / 5dk"));
 		} finally {
 			component.dispose();
 			cache.dispose();
@@ -143,12 +143,21 @@ describe("minimal footer", () => {
 		const data = { ...state, model: "GPT-6.1 Sol (high)", cwd: "/tmp/arda-pi-ui", cost: 0.123 };
 		const medium = buildFooterLines(data, 80, paint)[0];
 		assert.ok(medium.includes("75.5k / 500k"));
-		assert.ok(!medium.includes("cache ") || medium.includes("cache 78%"));
+		assert.ok(!medium.includes("cache ") || medium.includes("cache read 78%"));
 		assert.ok(!medium.includes("ttl ") || medium.includes(state.cacheTimer));
 		const narrow = buildFooterLines(data, 40, paint)[0];
 		assert.ok(narrow.includes("75.5k / 500k"));
 		assert.ok(narrow.endsWith("$0.123 est"));
 		assert.ok(!narrow.includes("arda-pi"));
+	});
+
+	it("keeps context percentage instead of a model fragment when only a few columns remain", () => {
+		for (const width of [15, 16, 17, 18]) {
+			const line = buildFooterLines({ ...state, cost: 0.123 }, width, paint)[0];
+			assert.ok(line.includes("15%"), line);
+			assert.ok(line.endsWith("$0.123 est"), line);
+			assert.ok(visibleWidth(line) <= width);
+		}
 	});
 
 	it("omits unknown latest cache usage instead of crashing or reusing an older value", () => {
@@ -164,9 +173,9 @@ describe("minimal footer", () => {
 	});
 
 	it("keeps detached HEAD changes visible without borrowing a named branch's stale count", async () => {
-		let branch = "";
-		const git = new GitInfoController(async (_cmd, args) => ({
-			stdout: args[1] === "--is-inside-work-tree" ? "true" : args[1] === "--short" ? "abc123" : args[0] === "status" ? " M one.ts\n?? two.ts\n" : args[0] === "branch" ? branch : "", code: 0,
+		let branch = "(detached)";
+		const git = new GitInfoController(async () => ({
+			stdout: `# branch.oid abc123\0# branch.head ${branch}\0? one.ts\0? two.ts\0`, code: 0,
 		}));
 		await git.refresh("/tmp/project");
 		const component = mountFooter([], "detached", git);
@@ -272,7 +281,7 @@ describe("minimal footer", () => {
 		assert.ok(component);
 		assert.ok(widgets.every(([key, content]) => key === "cache-timer" && content === undefined));
 		assert.ok(stripAnsi(component.render(160)[0]).startsWith("Test model (low) | project | main"));
-		assert.ok(stripAnsi(component.render(160)[0]).includes("cache 78%"));
+		assert.ok(stripAnsi(component.render(160)[0]).includes("cache read 78%"));
 		assert.ok(stripAnsi(component.render(160)[0]).endsWith("$0.100 est"));
 		entries.push(
 			{ type: "usage", usage: { cost: { total: 0.2 } } },
@@ -290,7 +299,7 @@ describe("minimal footer", () => {
 		entries.push({ type: "compaction", usage: { cost: { total: 0.5 } } });
 		leaf = "after-compaction";
 		contextUsage = undefined;
-		assert.ok(!stripAnsi(component.render(160)[0]).includes("cache 78%"));
+		assert.ok(!stripAnsi(component.render(160)[0]).includes("cache read 78%"));
 		assert.ok(stripAnsi(component.render(160)[0]).includes("? / 500k"));
 		assert.ok(stripAnsi(component.render(160)[0]).endsWith("$1.50 est"));
 		entries.push({ type: "usage", usage: {} });

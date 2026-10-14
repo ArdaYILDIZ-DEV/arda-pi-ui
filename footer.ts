@@ -6,7 +6,8 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { colorizeRgb, formatCacheElapsed, getCacheColor, type CacheTimerController } from "./cache-timer.ts";
+import { colorizeRgb, formatCacheElapsed, formatPromptCacheObservation, getCacheColor, type CacheTimerController } from "./cache-timer.ts";
+import { cacheReadPercent } from "./prompt-cache.ts";
 import type { GitInfoController } from "./git-info.ts";
 import { fg, resolvePalette, resolveThemeAppearance, resolveThemeColorMode, sanitizeControlChars, stripAnsi, themeText } from "./palette.ts";
 
@@ -19,6 +20,7 @@ export interface FooterState {
 	readonly cacheTimer: string;
 	readonly cacheExpired: boolean;
 	readonly cacheRatio?: number;
+	readonly cacheNeutral?: boolean;
 	/** Session-wide recorded estimate; null means at least one usage has no price. */
 	readonly cost?: number | null;
 	readonly statuses: ReadonlyMap<string, string>;
@@ -82,12 +84,12 @@ export function buildFooterLines(
 		{ role: "context", text: contextText },
 	];
 	if (state.cacheHitRate !== undefined && Number.isFinite(state.cacheHitRate)) {
-		parts.push({ role: "cache", text: paint.muted(`cache ${Math.round(state.cacheHitRate)}%`) });
+		parts.push({ role: "cache", text: paint.muted(`cache read ${Math.round(state.cacheHitRate)}%`) });
 	}
 	if (state.cacheTimer) {
 		const text = clean(state.cacheTimer);
 		const ratio = state.cacheRatio ?? (state.cacheExpired ? 1 : 0);
-		parts.push({ role: "ttl", text: paint.ttl ? paint.ttl(text, ratio) : (state.cacheExpired ? paint.warning : paint.muted)(text) });
+		parts.push({ role: "ttl", text: state.cacheNeutral ? paint.muted(text) : paint.ttl ? paint.ttl(text, ratio) : (state.cacheExpired ? paint.warning : paint.muted)(text) });
 	}
 	const fitPrimary = (budget: number): string => {
 		if (budget < 1) return "";
@@ -103,8 +105,10 @@ export function buildFooterLines(
 		}
 		if (visibleWidth(contextText) <= budget) return contextText;
 		const percent = state.context?.percent;
-		const compactContext = contextPaint(`ctx ${typeof percent === "number" && Number.isFinite(percent) ? `${Math.round(percent)}%` : "?"}`);
-		return visibleWidth(compactContext) <= budget ? compactContext : truncateToWidth(modelText, budget, "…");
+		const percentage = typeof percent === "number" && Number.isFinite(percent) ? `${Math.round(percent)}%` : "?";
+		const compactContext = contextPaint(`ctx ${percentage}`);
+		if (visibleWidth(compactContext) <= budget) return compactContext;
+		return visibleWidth(percentage) <= budget ? contextPaint(percentage) : contextPaint("?");
 	};
 	let primary = fitPrimary(columns);
 	if (state.cost !== undefined) {
@@ -159,7 +163,7 @@ export function registerFooter(pi: ExtensionAPI, options: FooterOptions = {}): v
 				},
 				render(width: number): string[] {
 					const manager = ctx.sessionManager;
-					const key = `${manager.getSessionId()}:${manager.getLeafId()}:${ctx.model?.provider}:${ctx.model?.id}`;
+					const key = `${manager.getSessionId()}:${manager.getLeafId()}:${ctx.model?.provider}:${ctx.model?.id}:${ctx.model?.api}`;
 					if (statsKey !== key) {
 						context = ctx.getContextUsage() ?? (ctx.model?.contextWindow ? {
 							tokens: null, contextWindow: ctx.model.contextWindow, percent: null,
@@ -175,6 +179,9 @@ export function registerFooter(pi: ExtensionAPI, options: FooterOptions = {}): v
 					const branch = sameBranch ? git.branch : detectedBranch;
 					const changed = sameBranch ? git.changedFiles : 0;
 					const cache = options.cache?.getState();
+					const observation = ctx.model?.provider ? options.cache?.getCacheObservation(ctx) : undefined;
+					const age = observation?.timestamp === undefined ? undefined : Math.max(0, Date.now() - observation.timestamp);
+					const ratio = age !== undefined && observation?.ttlMs ? age / observation.ttlMs : undefined;
 					const hasCache = cache?.isVisible && (cache.lastContextTimestamp !== null || cache.isProcessing);
 					const level = ctx.model?.reasoning ? ` (${pi.getThinkingLevel()})` : "";
 					return buildFooterLines({
@@ -183,9 +190,11 @@ export function registerFooter(pi: ExtensionAPI, options: FooterOptions = {}): v
 						git: branch ? `${branch}${changed > 0 ? ` +${changed}` : ""}` : "",
 						context,
 						cacheHitRate,
-						cacheTimer: hasCache && options.cache ? `ttl ${formatCacheElapsed(cache.isProcessing ? 0 : cache.elapsedMs)} / ${formatCacheElapsed(options.cache.getTtlMs()).replace(" 0sn", "")}` : "",
-						cacheExpired: cache?.isExpired ?? false,
-						cacheRatio: cache?.isProcessing ? 0 : cache?.ratio,
+						cacheTimer: observation ? (cache?.isVisible ? formatPromptCacheObservation(observation) : "")
+							: hasCache && options.cache ? `idle ${formatCacheElapsed(cache.isProcessing ? 0 : cache.elapsedMs)} / ${formatCacheElapsed(options.cache.getTtlMs()).replace(" 0sn", "")}` : "",
+						cacheExpired: observation ? (ratio !== undefined && ratio >= 1) : cache?.isExpired ?? false,
+						cacheRatio: observation ? ratio : cache?.isProcessing ? 0 : cache?.ratio,
+						cacheNeutral: observation !== undefined && ratio === undefined,
 						cost,
 						statuses: footerData.getExtensionStatuses(),
 					}, width, footerPaint(ctx.ui.theme ?? theme));
@@ -219,12 +228,10 @@ function latestCacheHitRate(ctx: ExtensionContext): number | undefined {
 		const entry = entries[i];
 		if (entry.type === "compaction") return undefined;
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		const usage = entry.message.usage;
-		if (!usage || ![usage.input, usage.cacheRead, usage.cacheWrite].every(
-			(value) => typeof value === "number" && Number.isFinite(value) && value >= 0,
-		)) return undefined;
-		const total = usage.input + usage.cacheRead + usage.cacheWrite;
-		return total > 0 && Number.isFinite(total) ? usage.cacheRead / total * 100 : undefined;
+		const message = entry.message;
+		if (message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "pending" || message.stopReason === "deferred") return undefined;
+		if (ctx.model?.provider && (message.provider !== ctx.model.provider || message.model !== ctx.model.id)) return undefined;
+		return cacheReadPercent(message.usage);
 	}
 	return undefined;
 }

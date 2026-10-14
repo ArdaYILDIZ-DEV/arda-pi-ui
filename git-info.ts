@@ -157,25 +157,45 @@ export const defaultCommandRunner: CommandRunnerFn = (
 	});
 };
 
+/** Parse NUL-delimited porcelain v2; rename source paths are separate records. */
+function parseStatus(output: string): GitInfoState {
+	let branch = "";
+	let oid = "";
+	let changedFiles = 0;
+	const records = output.split("\0");
+	for (let i = 0; i < records.length; i++) {
+		const record = records[i]!;
+		if (record.startsWith("# branch.head ")) branch = record.slice(14);
+		else if (record.startsWith("# branch.oid ")) oid = record.slice(13);
+		else if (/^[12u?] /.test(record)) {
+			changedFiles++;
+			if (record.startsWith("2 ")) i++;
+		}
+	}
+	if (!branch) return emptyGitInfoState();
+	return {
+		isRepository: true,
+		branch: branch === "(detached)" ? `detached${/^[a-f0-9]+$/i.test(oid) ? `@${oid.slice(0, 7)}` : ""}` : branch,
+		changedFiles,
+		pullRequest: null,
+	};
+}
+
 export class GitInfoController {
 	private state: GitInfoState = emptyGitInfoState();
 	private readonly listeners = new Set<(state: GitInfoState) => void>();
 	private runner: CommandRunnerFn = defaultCommandRunner;
-	private currentCwd: string = "";
+	private currentCwd = "";
+	private stateCwd = "";
+	private generation = 0;
+	private disposed = false;
 	private isRefreshing = false;
 	private refreshPending = false;
 	private refreshPrPending = false;
-	private pendingRefreshWaiters: {
-		resolve(state: GitInfoState): void;
-		reject(error: unknown): void;
-	}[] = [];
-	private lastQueriedPrBranch: string | null = null;
-	private lastQueriedPrCwd: string | null = null;
+	private pendingRefreshWaiters: ((state: GitInfoState) => void)[] = [];
 
 	constructor(runner?: CommandRunnerFn) {
-		if (typeof runner === "function") {
-			this.runner = runner;
-		}
+		if (typeof runner === "function") this.runner = runner;
 	}
 
 	public getState(): GitInfoState {
@@ -187,140 +207,91 @@ export class GitInfoController {
 	}
 
 	public addListener(listener: (state: GitInfoState) => void): () => void {
-		this.listeners.add(listener);
-		return () => {
-			this.listeners.delete(listener);
-		};
+		if (!this.disposed) this.listeners.add(listener);
+		return () => { this.listeners.delete(listener); };
 	}
 
-	private notify(): void {
-		const snap = { ...this.state };
+	private publish(state: GitInfoState): void {
+		const old = this.state;
+		this.state = state;
+		if (old.isRepository === state.isRepository && old.branch === state.branch &&
+			old.changedFiles === state.changedFiles && old.pullRequest?.number === state.pullRequest?.number &&
+			old.pullRequest?.url === state.pullRequest?.url && old.pullRequest?.isDraft === state.pullRequest?.isDraft) return;
 		for (const listener of this.listeners) {
 			try {
-				listener(snap);
+				listener({ ...state });
 			} catch {
-				/* ignore listener errors */
+				/* A listener must not prevent other UI subscribers from updating. */
 			}
 		}
+	}
+
+	public dispose(): void {
+		this.disposed = true;
+		this.generation++;
+		this.listeners.clear();
+		this.refreshPending = false;
+		this.refreshPrPending = false;
+		for (const resolve of this.pendingRefreshWaiters.splice(0)) resolve(this.state);
 	}
 
 	public async refresh(cwd?: string, options?: { refreshPr?: boolean }): Promise<GitInfoState> {
-		if (cwd) {
+		if (this.disposed) return this.state;
+		if (cwd && cwd !== this.currentCwd) {
 			this.currentCwd = cwd;
+			this.generation++;
 		}
 		const targetCwd = this.currentCwd || process.cwd();
-
 		if (this.isRefreshing) {
 			this.refreshPending = true;
 			this.refreshPrPending ||= options?.refreshPr === true;
-			return new Promise<GitInfoState>((resolve, reject) => {
-				this.pendingRefreshWaiters.push({ resolve, reject });
-			});
+			return new Promise((resolve) => { this.pendingRefreshWaiters.push(resolve); });
 		}
 
+		const generation = this.generation;
+		const isCurrent = () => !this.disposed && generation === this.generation;
 		this.isRefreshing = true;
 		try {
-			// 1. Verify if directory is inside a git repository
-			const repoCheck = await this.runner(
-				"git",
-				["rev-parse", "--is-inside-work-tree"],
-				targetCwd,
-				DEFAULT_GIT_TIMEOUT_MS,
-			);
+			// One atomic snapshot, no index locks and no ahead/behind traversal.
+			const result = await this.runner("git", [
+				"--no-optional-locks", "status", "--porcelain=v2", "--branch",
+				"--untracked-files=all", "--no-ahead-behind", "-z",
+			], targetCwd, DEFAULT_GIT_TIMEOUT_MS);
+			if (!isCurrent()) return this.state;
+			const next = result.code === 0 ? parseStatus(result.stdout) : emptyGitInfoState();
+			const pullRequest = next.isRepository && targetCwd === this.stateCwd &&
+				next.branch === this.state.branch && !options?.refreshPr ? this.state.pullRequest : null;
+			this.stateCwd = targetCwd;
+			this.publish({ ...next, pullRequest });
 
-			if (repoCheck.code !== 0 || repoCheck.stdout.trim() !== "true") {
-				this.lastQueriedPrBranch = null;
-				this.lastQueriedPrCwd = null;
-				this.state = emptyGitInfoState();
-				this.notify();
-				return this.state;
-			}
-
-			// 2. Query branch, HEAD commit hash, and changed files concurrently
-			const [branchRes, headRes, statusRes] = await Promise.all([
-				this.runner(
-					"git",
-					["branch", "--show-current"],
-					targetCwd,
-					DEFAULT_GIT_TIMEOUT_MS,
-				),
-				this.runner(
-					"git",
-					["rev-parse", "--short", "HEAD"],
-					targetCwd,
-					DEFAULT_GIT_TIMEOUT_MS,
-				),
-				this.runner(
-					"git",
-					["status", "--porcelain=v1", "--untracked-files=all"],
-					targetCwd,
-					DEFAULT_GIT_TIMEOUT_MS,
-				),
-			]);
-
-			const rawBranch = branchRes.stdout.trim();
-			const shortHead = headRes.stdout.trim();
-			const branch =
-				rawBranch || (shortHead ? `detached@${shortHead}` : "detached");
-			const changedFiles =
-				statusRes.code === 0 ? countChangedFiles(statusRes.stdout) : 0;
-			const branchChanged = rawBranch !== this.lastQueriedPrBranch ||
-				targetCwd !== this.lastQueriedPrCwd || options?.refreshPr === true;
-
-			this.state = {
-				isRepository: true,
-				branch,
-				changedFiles,
-				pullRequest: branchChanged ? null : this.state.pullRequest,
-			};
-			this.notify();
-
-			// 3. If there is an active named branch, query GitHub PR in the background
-			if (rawBranch && branchChanged) {
-				this.lastQueriedPrBranch = rawBranch;
-				this.lastQueriedPrCwd = targetCwd;
+			// PR information is not used by the footer. Never contact GitHub merely
+			// to render local status; /git refresh is the explicit network action.
+			if (options?.refreshPr && next.isRepository && !result.stdout.split("\0").includes("# branch.head (detached)")) {
 				try {
-					const prRes = await this.runner(
-						"gh",
-						["pr", "view", rawBranch, "--json", "number,url,state,isDraft"],
-						targetCwd,
-						DEFAULT_GH_TIMEOUT_MS,
-					);
-					if (prRes.code === 0) {
-						const pr = parsePullRequestJson(prRes.stdout);
-						if (pr && this.state.branch === rawBranch) {
-							this.state = {
-								...this.state,
-								pullRequest: pr,
-							};
-							this.notify();
-						}
+					const result = await this.runner("gh",
+						["pr", "view", next.branch, "--json", "number,url,state,isDraft"],
+						targetCwd, DEFAULT_GH_TIMEOUT_MS);
+					if (isCurrent() && result.code === 0) {
+						this.publish({ ...this.state, pullRequest: parsePullRequestJson(result.stdout) });
 					}
 				} catch {
-					/* gh CLI might not be installed or authenticated; non-fatal */
+					/* Missing/offline gh must not erase a valid local Git snapshot. */
 				}
-			} else if (!rawBranch) {
-				this.lastQueriedPrBranch = null;
-				this.lastQueriedPrCwd = null;
 			}
 		} catch {
-			this.state = emptyGitInfoState();
-			this.notify();
+			if (isCurrent()) this.publish(emptyGitInfoState());
 		} finally {
 			this.isRefreshing = false;
-			if (this.refreshPending) {
+			if (this.refreshPending && !this.disposed) {
 				const refreshPr = this.refreshPrPending;
-				const waiters = this.pendingRefreshWaiters;
-				this.pendingRefreshWaiters = [];
+				const waiters = this.pendingRefreshWaiters.splice(0);
 				this.refreshPending = false;
 				this.refreshPrPending = false;
-				void this.refresh(this.currentCwd, { refreshPr }).then(
-					(state) => { for (const waiter of waiters) waiter.resolve(state); },
-					(error: unknown) => { for (const waiter of waiters) waiter.reject(error); },
-				);
+				void this.refresh(this.currentCwd, { refreshPr }).then((state) => {
+					for (const resolve of waiters) resolve(state);
+				});
 			}
 		}
-
 		return this.state;
 	}
 }
@@ -331,18 +302,20 @@ export class GitInfoController {
 export function registerGitInfo(pi: ExtensionAPI): GitInfoController {
 	const controller = new GitInfoController();
 
-	pi.on("session_start", async (_event, ctx) => {
-		await controller.refresh(ctx?.cwd);
+	pi.on("session_start", (_event, ctx) => {
+		if (ctx.hasUI) void controller.refresh(ctx.cwd);
 	});
+
+	pi.on("session_shutdown", () => controller.dispose());
 
 	pi.on("tool_execution_end", (event, ctx) => {
 		// Known read-only builtins cannot change the repository; custom tools may.
-		if (["read", "grep", "find", "ls"].includes(event.toolName)) return;
+		if (!ctx.hasUI || ["read", "grep", "find", "ls"].includes(event.toolName)) return;
 		void controller.refresh(ctx?.cwd);
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
-		void controller.refresh(ctx?.cwd);
+		if (ctx.hasUI) void controller.refresh(ctx.cwd);
 	});
 
 	pi.registerCommand("git", {

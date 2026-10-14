@@ -137,124 +137,114 @@ describe("git-info pure helpers", () => {
 });
 
 describe("GitInfoController lifecycle & commands", () => {
-	it("handles non-git directories gracefully", async () => {
-		const mockRunner: CommandRunnerFn = async (cmd, args) => {
-			if (cmd === "git" && args[0] === "rev-parse") {
-				return { stdout: "false", code: 128 };
-			}
-			return { stdout: "", code: 0 };
-		};
+	const status = (branch = "main", changes = "", oid = "abc1234abcdef") =>
+		`# branch.oid ${oid}\0# branch.head ${branch}\0${changes}`;
+	const changed = "1 .M N... 100644 100644 100644 abc abc index.ts\0? new.txt\0";
+	const pr = (number = 99) => JSON.stringify({ number, url: "https://example.test/pr", state: "OPEN" });
 
-		const controller = new GitInfoController(mockRunner);
-		const state = await controller.refresh("/some/path");
-		assert.equal(state.isRepository, false);
-		assert.equal(state.branch, "");
-		assert.equal(state.changedFiles, 0);
+	it("handles non-git directories gracefully", async (t) => {
+		const controller = new GitInfoController(async () => ({ stdout: "", code: 128 }));
+		t.after(() => controller.dispose());
+		assert.deepEqual(await controller.refresh("/some/path"), emptyGitInfoState());
 	});
 
-	it("refreshes git branch and changed files using runner", async () => {
-		const mockRunner: CommandRunnerFn = async (cmd, args) => {
-			if (cmd === "git") {
-				if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
-					return { stdout: "true\n", code: 0 };
-				}
-				if (args[0] === "branch") {
-					return { stdout: "develop\n", code: 0 };
-				}
-				if (args[0] === "rev-parse" && args[1] === "--short") {
-					return { stdout: "ddee2db\n", code: 0 };
-				}
-				if (args[0] === "status") {
-					return { stdout: " M index.ts\n?? new.txt\n", code: 0 };
-				}
-			}
-			if (cmd === "gh") {
-				return {
-					stdout: JSON.stringify({
-						number: 99,
-						url: "https://github.com/pr/99",
-						state: "OPEN",
-					}),
-					code: 0,
-				};
-			}
-			return { stdout: "", code: 1 };
+	it("reads branch and changed files in one lock-free local command without GitHub access", async (t) => {
+		const calls: { cmd: string; args: string[] }[] = [];
+		const runner: CommandRunnerFn = async (cmd, args) => {
+			calls.push({ cmd, args });
+			return { stdout: status("develop", changed), code: 0 };
 		};
-
-		const controller = new GitInfoController(mockRunner);
-		let listenerFired = 0;
-		controller.addListener(() => {
-			listenerFired++;
-		});
-
+		const controller = new GitInfoController(runner);
+		t.after(() => controller.dispose());
+		let notifications = 0;
+		controller.addListener(() => notifications++);
 		const state = await controller.refresh("/repo");
-		assert.equal(state.isRepository, true);
-		assert.equal(state.branch, "develop");
-		assert.equal(state.changedFiles, 2);
-		assert.equal(state.pullRequest?.number, 99);
-		assert.ok(listenerFired > 0);
+		assert.deepEqual(state, { isRepository: true, branch: "develop", changedFiles: 2, pullRequest: null });
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0].cmd, "git");
+		for (const flag of ["--no-optional-locks", "--porcelain=v2", "--branch", "--no-ahead-behind", "-z"]) {
+			assert.ok(calls[0].args.includes(flag), flag);
+		}
+		assert.equal(notifications, 1);
+		await controller.refresh("/repo");
+		assert.equal(notifications, 1, "unchanged state must not redraw the footer");
 	});
 
-	it("handles detached HEAD state when branch name is empty", async () => {
-		const mockRunner: CommandRunnerFn = async (cmd, args) => {
-			if (cmd === "git") {
-				if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
-					return { stdout: "true\n", code: 0 };
-				}
-				if (args[0] === "branch") {
-					return { stdout: "\n", code: 0 };
-				}
-				if (args[0] === "rev-parse" && args[1] === "--short") {
-					return { stdout: "abc1234\n", code: 0 };
-				}
-				if (args[0] === "status") {
-					return { stdout: "", code: 0 };
-				}
-			}
-			return { stdout: "", code: 1 };
-		};
-
-		const controller = new GitInfoController(mockRunner);
-		const state = await controller.refresh("/repo");
-		assert.equal(state.isRepository, true);
-		assert.equal(state.branch, "detached@abc1234");
-		assert.equal(state.changedFiles, 0);
+	it("handles detached HEAD and unborn branches without extra commands", async (t) => {
+		let output = status("(detached)");
+		const controller = new GitInfoController(async () => ({ stdout: output, code: 0 }));
+		t.after(() => controller.dispose());
+		assert.equal((await controller.refresh("/repo")).branch, "detached@abc1234");
+		output = status("new-branch", "", "(initial)");
+		assert.equal((await controller.refresh("/repo")).branch, "new-branch");
 	});
 
-	it("reuses PR lookup until the branch or repository changes, with explicit refresh support", async () => {
+	it("counts renames, conflicts and newline-containing paths without counting rename sources", async (t) => {
+		const output = status("main",
+			"2 R. N... 100644 100644 100644 abc abc R100 destination\0? source\nname\0" +
+			"? new\nfile\0u UU N... 100644 100644 100644 100644 abc abc abc conflict\0");
+		const controller = new GitInfoController(async () => ({ stdout: output, code: 0 }));
+		t.after(() => controller.dispose());
+		assert.equal((await controller.refresh("/repo")).changedFiles, 3);
+	});
+
+	it("only queries PRs explicitly and invalidates cached PRs on repository or branch changes", async (t) => {
 		const calls: string[] = [];
-		const controller = new GitInfoController(async (cmd, args, cwd) => {
+		let branch = "main";
+		const controller = new GitInfoController(async (cmd, _args, cwd) => {
 			if (cmd === "gh") {
 				calls.push(cwd);
-				return { stdout: JSON.stringify({ number: cwd === "/repo-a" ? 1 : 2, url: "https://example.test/pr", state: "OPEN" }), code: 0 };
+				return { stdout: pr(cwd === "/repo-a" ? 1 : 2), code: 0 };
 			}
-			return { stdout: args[1] === "--is-inside-work-tree" ? "true" : args[0] === "branch" ? "main" : "", code: 0 };
+			return { stdout: status(branch), code: 0 };
 		});
+		t.after(() => controller.dispose());
 		await controller.refresh("/repo-a");
+		assert.deepEqual(calls, []);
+		await controller.refresh("/repo-a", { refreshPr: true });
 		await controller.refresh("/repo-a");
 		assert.deepEqual(calls, ["/repo-a"]);
+		assert.equal(controller.getState().pullRequest?.number, 1);
 		await controller.refresh("/repo-b");
-		assert.deepEqual(calls, ["/repo-a", "/repo-b"]);
-		assert.equal(controller.getState().pullRequest?.number, 2);
+		assert.equal(controller.getState().pullRequest, null);
 		await controller.refresh("/repo-b", { refreshPr: true });
-		assert.equal(calls.length, 3);
+		assert.equal(controller.getState().pullRequest?.number, 2);
+		branch = "other";
+		await controller.refresh("/repo-b");
+		assert.equal(controller.getState().pullRequest, null);
+		assert.deepEqual(calls, ["/repo-a", "/repo-b"]);
 	});
 
-	it("preserves an explicit PR refresh requested during an in-flight update", async () => {
+	it("does not confuse a named detached-fix branch with detached HEAD, or erase Git data when gh fails", async (t) => {
+		let queries = 0;
+		const controller = new GitInfoController(async (cmd) => {
+			if (cmd === "gh") { queries++; throw new Error("offline"); }
+			return { stdout: status("detached-fix", changed), code: 0 };
+		});
+		t.after(() => controller.dispose());
+		const state = await controller.refresh("/repo", { refreshPr: true });
+		assert.equal(queries, 1);
+		assert.equal(state.branch, "detached-fix");
+		assert.equal(state.changedFiles, 2);
+		controller.dispose();
+	});
+
+	it("preserves an explicit PR refresh requested during an in-flight update", async (t) => {
 		let release!: () => void;
 		let reached!: () => void;
 		const gate = new Promise<void>((resolve) => { release = resolve; });
 		const started = new Promise<void>((resolve) => { reached = resolve; });
 		let calls = 0;
-		const controller = new GitInfoController(async (cmd, args) => {
+		const controller = new GitInfoController(async (cmd) => {
 			if (cmd === "gh") {
 				calls++;
 				if (calls === 1) { reached(); await gate; }
 				return { stdout: "", code: 1 };
 			}
-			return { stdout: args[1] === "--is-inside-work-tree" ? "true" : args[0] === "branch" ? "main" : "", code: 0 };
+			return { stdout: status(), code: 0 };
 		});
-		const first = controller.refresh("/repo");
+		t.after(() => controller.dispose());
+		const first = controller.refresh("/repo", { refreshPr: true });
 		await started;
 		let queuedSettled = false;
 		const queued = controller.refresh("/repo", { refreshPr: true }).then((state) => {
@@ -272,57 +262,87 @@ describe("GitInfoController lifecycle & commands", () => {
 		assert.equal(calls, 2);
 	});
 
-	it("does not spawn git inspections for read-only builtin tool completions", async () => {
-		const handlers = new Map<string, Function>();
-		const controller = registerGitInfo({ on: (name: string, handler: Function) => handlers.set(name, handler), registerCommand: () => {} } as any);
-		let calls = 0;
-		controller.setRunner(async () => { calls++; return { stdout: "", code: 1 }; });
-		for (const toolName of ["read", "grep", "find", "ls"]) {
-			handlers.get("tool_execution_end")!({ toolName }, { cwd: "/repo" });
-		}
-		assert.equal(calls, 0);
-		handlers.get("tool_execution_end")!({ toolName: "edit" }, { cwd: "/repo" });
-		assert.equal(calls, 1);
+	it("does not publish stale repository results when cwd changes during a refresh", async (t) => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const controller = new GitInfoController(async (_cmd, _args, cwd) => {
+			if (cwd === "/old") await gate;
+			return { stdout: status(cwd === "/old" ? "old" : "new"), code: 0 };
+		});
+		t.after(() => controller.dispose());
+		const branches: string[] = [];
+		controller.addListener((state) => branches.push(state.branch));
+		const first = controller.refresh("/old");
+		const second = controller.refresh("/new");
+		release();
+		await Promise.all([first, second]);
+		assert.deepEqual(branches, ["new"]);
 	});
 
-	it("registers slash command /git and handles /git refresh", async () => {
-		type HandlerFn = (args: string, ctx: any) => Promise<void>;
-		let registeredHandler: HandlerFn | undefined;
-		const mockPi = {
-			on: () => {},
-			registerCommand: (name: string, opts: any) => {
-				if (name === "git") registeredHandler = opts.handler;
-			},
-		};
-
-		const controller = registerGitInfo(mockPi as any);
-		assert.ok(registeredHandler !== undefined);
-		const handler = registeredHandler!;
-
-		const notified: string[] = [];
-		const mockCtx = {
-			cwd: "/mock",
-			ui: {
-				notify: (msg: string) => notified.push(msg),
-			},
-		};
-
-		// Mock controller runner for testing the command
-		controller.setRunner(async (cmd, args) => {
-			if (cmd === "git" && args[1] === "--is-inside-work-tree")
-				return { stdout: "true\n", code: 0 };
-			if (cmd === "git" && args[0] === "branch")
-				return { stdout: "main\n", code: 0 };
-			if (cmd === "git" && args[0] === "status")
-				return { stdout: " M a.ts\n", code: 0 };
-			return { stdout: "", code: 0 };
+	it("settles pending refreshes without publishing or starting more commands after disposal", async (t) => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		let calls = 0;
+		let notifications = 0;
+		const controller = new GitInfoController(async () => {
+			calls++;
+			await gate;
+			return { stdout: status(), code: 0 };
 		});
+		t.after(() => controller.dispose());
+		controller.addListener(() => notifications++);
+		const first = controller.refresh("/repo");
+		const second = controller.refresh("/repo");
+		try {
+			controller.dispose();
+		} finally {
+			release();
+		}
+		await Promise.all([first, second]);
+		await controller.refresh("/repo");
+		assert.equal(calls, 1);
+		assert.equal(notifications, 0);
+	});
 
-		await handler("refresh", mockCtx);
+	it("does not spawn inspections for headless sessions or read-only builtin completions", async (t) => {
+		const handlers = new Map<string, Function>();
+		const controller = registerGitInfo({ on: (name: string, handler: Function) => handlers.set(name, handler), registerCommand: () => {} } as any);
+		t.after(() => controller.dispose());
+		let calls = 0;
+		controller.setRunner(async () => { calls++; return { stdout: "", code: 1 }; });
+		try {
+			for (const toolName of ["read", "grep", "find", "ls"]) {
+				handlers.get("tool_execution_end")!({ toolName }, { cwd: "/repo", hasUI: true });
+			}
+			await handlers.get("session_start")!({}, { cwd: "/repo", hasUI: false });
+			handlers.get("agent_settled")!({}, { cwd: "/repo", hasUI: false });
+			handlers.get("tool_execution_end")!({ toolName: "edit" }, { cwd: "/repo", hasUI: false });
+			assert.equal(calls, 0);
+			handlers.get("tool_execution_end")!({ toolName: "edit" }, { cwd: "/repo", hasUI: true });
+			assert.equal(calls, 1);
+			handlers.get("session_shutdown")!({}, {});
+		} finally {
+			controller.dispose();
+		}
+	});
+
+	it("registers /git and refreshes PR information only on /git refresh", async (t) => {
+		let handler: ((args: string, ctx: any) => Promise<void>) | undefined;
+		const controller = registerGitInfo({
+			on: () => {},
+			registerCommand: (name: string, opts: any) => { if (name === "git") handler = opts.handler; },
+		} as any);
+		t.after(() => controller.dispose());
+		const notified: string[] = [];
+		const ctx = { cwd: "/mock", ui: { notify: (msg: string) => notified.push(msg) } };
+		controller.setRunner(async (cmd) => ({
+			stdout: cmd === "gh" ? pr() : status("main", "1 .M N... 100644 100644 100644 abc abc a.ts\0"), code: 0,
+		}));
+		assert.ok(handler);
+		await handler("refresh", ctx);
 		assert.ok(notified.pop()?.includes("güncellendi"));
-
-		await handler("", mockCtx);
-		const statusMsg = notified.pop()!;
-		assert.ok(statusMsg.includes("main* · 1 dosya"));
+		await handler("", ctx);
+		assert.ok(notified.pop()?.includes("main* · 1 dosya · PR #99"));
+		controller.dispose();
 	});
 });
