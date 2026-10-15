@@ -9,7 +9,6 @@ import type {
 	Theme,
 	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import * as PiTui from "@earendil-works/pi-tui";
 import {
 	resolvePalette,
 	resolveThemeAppearance,
@@ -25,6 +24,7 @@ import { playAudio, resolveSoundPath, type SoundPlayerFn } from "./audio.ts";
 import {
 	DEFAULT_CACHE_TTL_MS,
 	buildCacheTimerLine,
+	cacheTtlText,
 	colorizeRgb,
 	formatCacheElapsed,
 	formatCacheRemaining,
@@ -38,17 +38,12 @@ export {
 	DEFAULT_CACHE_TTL_MS, DARK_CACHE_STOPS, LIGHT_CACHE_STOPS,
 	interpolateRgb, getCacheColor, rgbToAnsi, colorizeRgb,
 	formatCacheElapsed, formatCacheRemaining, getCacheTtlRatio,
-	buildCacheTimerLine, formatPromptCacheObservation,
+	buildCacheTimerLine, cacheTtlText, formatPromptCacheObservation,
 	type ColorStop, type CacheTimerFrameState, type CacheTimerPaint,
 } from "./cache-display.ts";
 
 /** Change one tuple for every provider/window; ratios must increase strictly within (0, 1). */
 export const DEFAULT_CACHE_SOUND_RATIOS: readonly [number, number, number] = [0.5, 0.8, 0.9];
-
-// Widget render failures tolerated in a row before the 1s loop stops itself.
-// A single transient UI error (teardown race) must not freeze the widget or
-// silence milestone sounds; lifecycle events restart the loop via startLoop.
-const MAX_CONSECUTIVE_WIDGET_ERRORS = 5;
 
 // ---------------------------------------------------------------------------
 // Audio notification milestones & playback helpers
@@ -137,7 +132,6 @@ export class CacheTimerController {
 	private soundPlayer: SoundPlayerFn = playAudio;
 	private gitInfoProvider: (() => string | null) | null = null;
 	private readonly firedMilestones = new Set<string>();
-	private consecutiveWidgetErrors = 0;
 	private cachedTheme: Theme | undefined;
 	private cachedPaint: CacheTimerPaint | null = null;
 	private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS;
@@ -353,13 +347,7 @@ export class CacheTimerController {
 		const colorMode = resolveThemeColorMode(theme);
 		const paint: CacheTimerPaint = {
 			colorize: (text, c) => colorizeRgb(text, c, colorMode),
-			ttlColor: theme && typeof theme.colors === "object" ? (text, ratio) => {
-				const colors = theme.colors;
-				const color = ratio <= 0.6
-					? PiTui.mixColors(colors.success, colors.warning, ratio / 0.6, "srgb")
-					: PiTui.mixColors(colors.warning, colors.error, (ratio - 0.6) / 0.4, "srgb");
-				return PiTui.styleText(text, { fg: color }, colorMode);
-			} : undefined,
+			ttlColor: (text, ratio) => cacheTtlText(text, ratio, theme),
 			dim: (text) => themeText(theme, "dim", text, (value) => `\x1b[2m${value}\x1b[22m`),
 			accent: (text) => themeText(theme, "accent", text, (value) => paletteFg(palette.cc.claude, value, colorMode)),
 			red: (text) => themeText(theme, "error", text, (value) => paletteFg(palette.cc.error, value, colorMode)),
@@ -374,7 +362,6 @@ export class CacheTimerController {
 
 	public startLoop(ctx: UiCtx): void {
 		this.lastCtx = ctx;
-		this.consecutiveWidgetErrors = 0;
 		if (!ctx.hasUI) {
 			this.stopLoop();
 			return;
@@ -395,8 +382,16 @@ export class CacheTimerController {
 
 	public repaint(ctx: UiCtx): void {
 		this.lastCtx = ctx;
-		// Host activity also covers compaction/retries and lifecycle reset races.
-		if (ctx.isIdle && !ctx.isIdle()) this.isProcessing = true;
+		// Manual compaction can finish without agent_settled. Observe both host
+		// transitions so the reminder cannot stay stuck in processing afterward.
+		if (ctx.isIdle) {
+			const processing = !ctx.isIdle();
+			if (this.isProcessing && !processing) {
+				this.lastContextTimestamp = Date.now();
+				this.resetMilestones();
+			}
+			this.isProcessing = processing;
+		}
 		if (!ctx.hasUI || !ctx.ui?.setWidget) return;
 
 		const elapsedMs =
@@ -415,7 +410,6 @@ export class CacheTimerController {
 		try {
 			if (this.footerRenderer) {
 				this.footerRenderer();
-				this.consecutiveWidgetErrors = 0;
 				return;
 			}
 			const gitSummary = this.gitInfoProvider ? this.gitInfoProvider() : null;
@@ -426,7 +420,6 @@ export class CacheTimerController {
 				(this.lastContextTimestamp === null && !this.isProcessing && !gitSummary)
 			) {
 				ctx.ui.setWidget("cache-timer", undefined, { placement: "belowEditor" });
-				this.consecutiveWidgetErrors = 0;
 				return;
 			}
 
@@ -455,15 +448,9 @@ export class CacheTimerController {
 			}
 
 			ctx.ui.setWidget("cache-timer", [line], { placement: "belowEditor" });
-			this.consecutiveWidgetErrors = 0;
 		} catch {
-			// Tolerate transient UI errors (teardown races): stop the loop only
-			// after repeated consecutive failures. Every agent lifecycle event
-			// restarts it via startLoop, so recovery is automatic.
-			this.consecutiveWidgetErrors++;
-			if (this.consecutiveWidgetErrors >= MAX_CONSECUTIVE_WIDGET_ERRORS) {
-				this.stopLoop();
-			}
+			// Presentation is best-effort. Keep the shared audio/refresh loop alive;
+			// shutdown/disposal, not a failed frame, owns its lifetime.
 		}
 	}
 
@@ -477,51 +464,29 @@ export class CacheTimerController {
 		this.observationCache = undefined;
 		// Only provider assistant requests on the active branch are activity evidence.
 		let foundTimestamp: number | null = null;
-		if (ctx.sessionManager?.getEntries) {
-			try {
-				const entries = ctx.sessionManager.getBranch?.() ?? ctx.sessionManager.getEntries();
-				if (Array.isArray(entries)) {
-					for (let i = entries.length - 1; i >= 0; i--) {
-						const e = entries[i];
-						if (e?.type === "compaction") break;
-						if (e?.type === "message" && e.message?.role === "assistant") {
-							const parsed = e.message.timestamp ?? Date.parse(e.timestamp ?? "");
-							if (Number.isFinite(parsed) && parsed > 0 && parsed <= Date.now()) {
-								foundTimestamp = parsed;
-								break;
-							}
+		try {
+			const entries = ctx.sessionManager?.getBranch?.() ?? ctx.sessionManager?.getEntries?.();
+			if (Array.isArray(entries)) {
+				for (let i = entries.length - 1; i >= 0; i--) {
+					const e = entries[i];
+					if (e?.type === "message" && e.message?.role === "assistant") {
+						const parsed = e.message.timestamp ?? Date.parse(e.timestamp ?? "");
+						if (Number.isFinite(parsed) && parsed > 0 && parsed <= Date.now()) {
+							foundTimestamp = parsed;
+							break;
 						}
 					}
 				}
-			} catch {
-				/* best-effort session entry inspection */
 			}
+		} catch {
+			/* best-effort session entry inspection */
 		}
 
 		this.lastContextTimestamp = foundTimestamp;
-
-		if (this.lastContextTimestamp === null) {
-			this.resetMilestones();
-			const gitSummary = this.gitInfoProvider ? this.gitInfoProvider() : null;
-			if (gitSummary) {
-				this.startLoop(ctx);
-				this.repaint(ctx);
-			} else {
-				this.stopLoop();
-				if (ctx.hasUI && ctx.ui?.setWidget) {
-					try {
-						ctx.ui.setWidget("cache-timer", undefined, { placement: "belowEditor" });
-					} catch {
-						/* best-effort */
-					}
-				}
-			}
-		} else {
-			const initialElapsed = Math.max(0, Date.now() - this.lastContextTimestamp);
-			this.seedMilestones(initialElapsed);
-			this.startLoop(ctx);
-			this.repaint(ctx);
-		}
+		this.seedMilestones(foundTimestamp === null ? 0 : Math.max(0, Date.now() - foundTimestamp));
+		if (foundTimestamp !== null || this.isProcessing || this.gitInfoProvider?.()) this.startLoop(ctx);
+		else this.stopLoop();
+		this.repaint(ctx);
 	}
 
 	public handleAgentStart(ctx: UiCtx): void {
@@ -552,7 +517,8 @@ export class CacheTimerController {
 	}
 
 	public handleAgentSettled(ctx: UiCtx): void {
-		if (this.isProcessing && this.lastContextTimestamp !== null) {
+		// A completed run needs no provider hook; duplicate settlements must not rearm sounds.
+		if (this.isProcessing || this.lastContextTimestamp === null) {
 			this.lastContextTimestamp = Date.now();
 			this.resetMilestones();
 		}
@@ -607,7 +573,8 @@ export function registerCacheTimer(
 		controller.handleBeforeProviderRequest(ctx, event.payload);
 	});
 
-	pi.on("model_select", async (_event, ctx) => controller.handleSessionStart(ctx));
+	// Model selection changes usage matching, not local activity or sound history.
+	pi.on("model_select", async (_event, ctx) => controller.repaint(ctx));
 	pi.on("session_compact", async (_event, ctx) => controller.handleSessionStart(ctx));
 	pi.on("session_tree", async (_event, ctx) => controller.handleSessionStart(ctx));
 

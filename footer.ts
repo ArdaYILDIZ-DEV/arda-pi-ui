@@ -7,7 +7,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { CacheTimerController } from "./cache-timer.ts";
-import { colorizeRgb, formatCacheElapsed, getCacheColor } from "./cache-display.ts";
+import { cacheTtlText, formatCacheElapsed } from "./cache-display.ts";
 import { cacheReadPercent } from "./prompt-cache.ts";
 import type { GitInfoController } from "./git-info.ts";
 import { fg, resolvePalette, resolveThemeAppearance, resolveThemeColorMode, sanitizeControlChars, stripAnsi, themeText } from "./palette.ts";
@@ -60,7 +60,7 @@ function footerPaint(theme?: Theme): FooterPaint {
 		accent: (text) => themeText(theme, "accent", text, (value) => fg(palette.cc.claude, value, colorMode)),
 		muted: (text) => themeText(theme, "muted", text, (value) => fg(palette.cc.inactive, value, colorMode)),
 		warning: (text) => themeText(theme, "warning", text, (value) => fg(palette.cc.warning, value, colorMode)),
-		ttl: (text, ratio) => colorizeRgb(text, getCacheColor(ratio, scheme), colorMode),
+		ttl: (text, ratio) => cacheTtlText(text, ratio, theme),
 	};
 }
 
@@ -92,9 +92,10 @@ export function buildFooterLines(
 		const ratio = state.cacheRatio ?? (state.cacheExpired ? 1 : 0);
 		parts.push({ role: "ttl", text: state.cacheNeutral ? paint.muted(text) : paint.ttl ? paint.ttl(text, ratio) : (state.cacheExpired ? paint.warning : paint.muted)(text) });
 	}
+	let selected = parts;
 	const fitPrimary = (budget: number): string => {
+		selected = budget < 1 ? [] : parts;
 		if (budget < 1) return "";
-		let selected = parts;
 		for (const role of ["ttl", "cache", "git", "folder"]) {
 			const line = selected.map((part) => part.text).join(separator);
 			if (visibleWidth(line) <= budget) return line;
@@ -111,18 +112,30 @@ export function buildFooterLines(
 		if (visibleWidth(compactContext) <= budget) return compactContext;
 		return visibleWidth(percentage) <= budget ? contextPaint(percentage) : contextPaint("?");
 	};
-	let primary = fitPrimary(columns);
+	let primary: string;
 	if (state.cost !== undefined) {
 		const price = paint.accent(formatCost(state.cost));
 		const priceWidth = visibleWidth(price);
 		if (priceWidth >= columns) {
+			selected = [];
 			primary = truncateToWidth(price, columns, "");
 		} else {
 			const left = fitPrimary(Math.max(0, columns - priceWidth - 2));
 			primary = left + " ".repeat(columns - visibleWidth(left) - priceWidth) + price;
 		}
+	} else {
+		primary = fitPrimary(columns);
 	}
 	const lines = [primary];
+	// Context and cost keep the primary row; cache information must not disappear.
+	const overflow = parts.filter((part) =>
+		(part.role === "cache" || part.role === "ttl") && !selected.includes(part),
+	).map((part) => part.text);
+	if (overflow.length > 0) {
+		const line = overflow.join(separator);
+		if (visibleWidth(line) <= columns) lines.push(line);
+		else for (const text of overflow) lines.push(...wrapTextWithAnsi(text, columns));
+	}
 	const statuses = Array.from(state.statuses.entries())
 		.sort(([a], [b]) => a.localeCompare(b))
 		.map(([, text]) => clean(text))

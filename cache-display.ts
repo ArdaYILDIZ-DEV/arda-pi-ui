@@ -1,6 +1,7 @@
 /** Pure cache formatting and standalone widget layout. */
-import { truncateToWidth } from "@earendil-works/pi-tui";
-import { type ColorMode, type Rgb, rgb, rgbTo256, visibleWidth, sanitizeControlChars, stripAnsi } from "./palette.ts";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { mixColors, styleText, truncateToWidth } from "@earendil-works/pi-tui";
+import { type ColorMode, type Rgb, rgb, rgbTo256, visibleWidth, sanitizeControlChars, stripAnsi, resolveThemeAppearance, resolveThemeColorMode } from "./palette.ts";
 import { DEFAULT_UNKNOWN_CACHE_TTL_MS, type PromptCacheObservation } from "./prompt-cache.ts";
 
 export const DEFAULT_CACHE_TTL_MS = DEFAULT_UNKNOWN_CACHE_TTL_MS;
@@ -77,6 +78,25 @@ export function getCacheColor(
 	}
 	const last = stops[stops.length - 1]!;
 	return rgb(last.r, last.g, last.b);
+}
+
+/** Shared semantic TTL ramp for the footer and standalone widget. */
+export function cacheTtlText(text: string, ratio: number, theme?: Theme): string {
+	const safeText = sanitizeControlChars(stripAnsi(text));
+	const safeRatio = getCacheTtlRatio(ratio, 1);
+	const mode = resolveThemeColorMode(theme);
+	try {
+		const colors = theme?.colors;
+		if (colors?.success && colors.warning && colors.error) {
+			const color = safeRatio <= 0.6
+				? mixColors(colors.success, colors.warning, safeRatio / 0.6, "srgb")
+				: mixColors(colors.warning, colors.error, (safeRatio - 0.6) / 0.4, "srgb");
+			return styleText(safeText, { fg: color }, mode);
+		}
+	} catch {
+		// Partial/legacy host themes still need a readable timer.
+	}
+	return colorizeRgb(safeText, getCacheColor(safeRatio, resolveThemeAppearance(theme)), mode);
 }
 
 /**

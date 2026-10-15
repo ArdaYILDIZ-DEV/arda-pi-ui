@@ -151,6 +151,23 @@ describe("minimal footer", () => {
 		assert.ok(!narrow.includes("arda-pi"));
 	});
 
+	it("wraps overflow cache information instead of hiding it, without displacing context or cost", () => {
+		const data = { ...state, model: "GPT-6.1 Sol (high)", cost: 0.123, statuses: new Map([["quota", "quota 95%"]]) };
+		for (const width of [20, 40, 80, 160]) {
+			const lines = buildFooterLines(data, width, paint);
+			const text = lines.join("\n");
+			assert.ok(text.includes("cache read 78%"), `cache usage missing at ${width} columns`);
+			assert.ok(text.includes(state.cacheTimer), `TTL missing at ${width} columns`);
+			assert.equal(text.split(state.cacheTimer).length - 1, 1, "TTL appears only once");
+			assert.ok(lines[0].endsWith("$0.123 est"));
+			assert.ok(text.includes("quota 95%"));
+			assert.ok(lines.every((line) => visibleWidth(line) <= width));
+		}
+		for (const width of [1, 5, 12]) {
+			assert.ok(buildFooterLines(data, width, paint).every((line) => visibleWidth(line) <= width));
+		}
+	});
+
 	it("keeps context percentage instead of a model fragment when only a few columns remain", () => {
 		for (const width of [15, 16, 17, 18]) {
 			const line = buildFooterLines({ ...state, cost: 0.123 }, width, paint)[0];

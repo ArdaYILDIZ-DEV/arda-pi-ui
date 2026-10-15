@@ -4,6 +4,8 @@ import { Theme } from "@earendil-works/pi-coding-agent";
 import { colorToHex, mixColors, visibleWidth } from "@earendil-works/pi-tui";
 import { SpinnerController } from "../spinner.ts";
 import { CacheTimerController, buildCacheTimerLine } from "../cache-timer.ts";
+import { registerFooter } from "../footer.ts";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getDiffThemeColors, renderToolDiffLines, ToolDiffComponent } from "../tool-diff.ts";
 import { stripAnsi } from "../palette.ts";
 
@@ -64,6 +66,47 @@ describe("host theme integration", () => {
 		} finally {
 			controller.dispose();
 		}
+	});
+
+	it("uses the same semantic TTL ramp in the footer and standalone widget", (t) => {
+		const now = 1_000_000;
+		t.mock.method(Date, "now", () => now);
+		const cache = new CacheTimerController({ soundEnabled: false });
+		t.after(() => cache.dispose());
+		for (const theme of [makeTheme("dark"), makeTheme("light", "256color")]) {
+			let component: { render(width: number): string[]; dispose(): void } | undefined;
+			let start: Function | undefined;
+			const ctx = {
+				hasUI: true, cwd: "/tmp/project", model: { id: "test" }, getContextUsage: () => undefined,
+				sessionManager: { getSessionId: () => "test", getLeafId: () => "leaf", getEntries: () => [], getBranch: () => [] },
+				ui: { theme, setWidget: () => {}, setFooter: (factory: Function) => {
+					component = factory({ requestRender: () => {} }, theme, {
+						getGitBranch: () => "", getExtensionStatuses: () => new Map(), onBranchChange: () => () => {},
+					});
+				} },
+			} as unknown as ExtensionContext;
+			registerFooter({ on: (_event: string, handler: Function) => { start = handler; } } as unknown as ExtensionAPI, { cache });
+			start!({}, ctx);
+			assert.ok(component);
+			try {
+				const paint = cache.paintFor(theme);
+				for (const elapsedMs of [0, 180_000, 240_000, 300_000, 360_000]) {
+					cache.setLastContextTimestamp(now - elapsedMs);
+					const row: string = component.render(160)[0];
+					const label = stripAnsi(row).match(/idle .*? \/ 5dk/)![0];
+					assert.ok(row.includes(paint.ttlColor!(label, cache.getState().ratio)), `${theme.getColorMode()} at ${elapsedMs}ms`);
+				}
+			} finally { component.dispose(); }
+		}
+	});
+
+	it("falls back to a usable cache ramp for incomplete host colors", () => {
+		const cache = new CacheTimerController({ soundEnabled: false });
+		try {
+			const theme = { fg: (_role: string, text: string) => text, colors: {}, appearance: "dark", getColorMode: () => "truecolor" } as unknown as Theme;
+			const row = buildCacheTimerLine({ elapsedMs: 180_000, columns: 80, hasContext: true, isProcessing: false }, cache.paintFor(theme));
+			assert.ok(row.includes("\x1b[38;2;255;193;7m3dk 0sn"));
+		} finally { cache.dispose(); }
 	});
 
 	it("derives diff colors from the theme's diff roles and surfaces", () => {

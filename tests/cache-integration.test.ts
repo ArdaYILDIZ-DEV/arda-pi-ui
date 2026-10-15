@@ -78,6 +78,7 @@ it("keeps a five-minute idle reminder separate from real usage and warm costs", 
 		for (const width of [1, 15, 30, 60, 100]) assert.ok(visibleWidth(component!.render(width)[0]) <= width);
 		ctx.model = { ...ctx.model!, provider: "xai", id: "grok-test", api: "openai-completions", promptCache: undefined };
 		await emit("model_select");
+		assert.match(row(), /idle 40sn \/ 5dk/, "changing models must not replace settlement time with the older request timestamp");
 		assert.ok(!row().includes("cache read 70%"));
 		assert.ok(!row().includes("age "));
 		assert.equal(settingsReads, 0, "extension does not enable or rewrite cache warming settings");

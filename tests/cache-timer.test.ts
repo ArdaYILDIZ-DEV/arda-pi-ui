@@ -393,6 +393,103 @@ describe("CacheTimerController lifecycle", () => {
 		}
 	});
 
+	it("starts a full five-minute reminder at settlement even without a provider hook or after a lifecycle reset", (t) => {
+		let now = 1_000_000;
+		t.mock.method(Date, "now", () => now);
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		for (const reset of [false, true]) {
+			const controller = new CacheTimerController({ soundEnabled: false });
+			const mock = createMockUi();
+			const current = { ...mock.ctx, sessionManager: { getEntries: () => [] } };
+			try {
+				controller.handleSessionStart(current);
+				controller.handleAgentStart(current);
+				if (reset) controller.handleSessionStart(current);
+				now += 600_000;
+				controller.handleMessageEnd({ type: "message_end", message: { role: "assistant" } } as any, current);
+				controller.handleAgentSettled(current);
+				assert.equal(controller.getLastContextTimestamp(), now);
+				assert.equal(controller.getState().elapsedMs, 0);
+				assert.equal(controller.getState().hasTimer, true);
+				assert.ok(stripAnsi(mock.widgets.get("cache-timer")!.content![0]!).endsWith("0sn / 5dk"));
+				now += 300_000;
+				t.mock.timers.tick(1000);
+				assert.equal(controller.getState().isExpired, true);
+				assert.ok(stripAnsi(mock.widgets.get("cache-timer")!.content![0]!).endsWith("5dk 0sn / 5dk"));
+			} finally { controller.dispose(); }
+		}
+	});
+
+	it("restores local activity across compaction from the active branch, independent of cache usage", (t) => {
+		t.mock.method(Date, "now", () => 1_100_000);
+		const controller = new CacheTimerController({ soundEnabled: false });
+		const mock = createMockUi();
+		try {
+			controller.handleSessionStart({ ...mock.ctx, sessionManager: {
+				getEntries: () => [{ type: "message", message: { role: "assistant", timestamp: 1_090_000 } }],
+				getBranch: () => [
+					{ type: "message", message: { role: "assistant", timestamp: 1_000_000 } },
+					{ type: "compaction", timestamp: new Date(1_050_000).toISOString() },
+					{ type: "message", message: { role: "user", timestamp: 1_080_000 } },
+				],
+			} });
+			assert.equal(controller.getLastContextTimestamp(), 1_000_000);
+			assert.equal(controller.getState().elapsedMs, 100_000);
+			assert.equal(controller.getState().hasTimer, true);
+			assert.ok(mock.widgets.has("cache-timer"));
+		} finally { controller.dispose(); }
+	});
+
+	it("resumes idle timing after host-only activity such as manual compaction", (t) => {
+		let now = 1_000_000;
+		let idle = false;
+		t.mock.method(Date, "now", () => now);
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		const played: number[] = [];
+		const controller = new CacheTimerController({ soundPlayer: (_file, repeat = 1) => played.push(repeat) });
+		t.after(() => controller.dispose());
+		const mock = createMockUi();
+		const ctx = { ...mock.ctx, isIdle: () => idle, sessionManager: {
+			getEntries: () => [{ type: "message", message: { role: "assistant", timestamp: 900_000 } }],
+		} };
+		controller.handleSessionStart(ctx);
+		now += 600_000;
+		t.mock.timers.tick(1000);
+		assert.equal(controller.getState().elapsedMs, 0);
+		assert.deepEqual(played, []);
+		idle = true;
+		t.mock.timers.tick(1000);
+		assert.equal(controller.getState().isProcessing, false);
+		assert.equal(controller.getState().elapsedMs, 0);
+		assert.deepEqual(played, [], "long activity must not replay overdue sounds");
+		now += 150_000;
+		t.mock.timers.tick(1000);
+		assert.equal(controller.getState().elapsedMs, 150_000);
+		assert.deepEqual(played, [1]);
+		controller.handleAgentSettled(ctx);
+		assert.equal(controller.getState().elapsedMs, 150_000, "late settlement must not restart the window");
+	});
+
+	it("keeps refreshing a busy session even without history or a Git summary", (t) => {
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		const controller = new CacheTimerController({ soundEnabled: false });
+		t.after(() => controller.dispose());
+		const mock = createMockUi();
+		controller.handleSessionStart({ ...mock.ctx, isIdle: () => false, sessionManager: { getEntries: () => [] } });
+		assert.equal(controller.getState().hasTimer, true);
+		assert.ok(stripAnsi(mock.widgets.get("cache-timer")!.content![0]!).endsWith("0sn / 5dk"));
+	});
+
+	it("restores history from a branch-only standalone session manager", (t) => {
+		t.mock.method(Date, "now", () => 1_000_000);
+		const controller = new CacheTimerController({ soundEnabled: false });
+		t.after(() => controller.dispose());
+		controller.handleSessionStart({ ...createMockUi().ctx, sessionManager: {
+			getBranch: () => [{ type: "message", message: { role: "assistant", timestamp: 900_000 } }],
+		} });
+		assert.equal(controller.getState().elapsedMs, 100_000);
+	});
+
 	it("reports a local reminder with the configured TTL, not a provider cache guarantee", (t) => {
 		t.mock.method(Date, "now", () => 1_000_000);
 		const controller = new CacheTimerController({ ttlMs: 60_000, soundEnabled: false });
@@ -882,28 +979,34 @@ describe("Cache audio warning milestones & playback", () => {
 		controller.dispose();
 	});
 
-	it("repaint stops the loop only after repeated widget failures", () => {
-		const controller = new CacheTimerController();
-		const mock = createMockUi();
-		controller.handleAgentSettled(mock.ctx);
-		assert.equal(controller.getState().hasTimer, true);
-
-		(mock.ctx.ui as any).setWidget = () => {
-			throw new Error("simulated UI teardown");
-		};
-		for (let i = 0; i < 4; i++) controller.repaint(mock.ctx);
-		assert.equal(
-			controller.getState().hasTimer,
-			true,
-			"loop survives transient errors",
-		);
-		controller.repaint(mock.ctx);
-		assert.equal(
-			controller.getState().hasTimer,
-			false,
-			"loop stops after repeated failures",
-		);
-
-		controller.dispose();
+	it("keeps audio and automatic recovery alive after repeated widget or footer failures", (t) => {
+		let now = 1_000_000;
+		t.mock.method(Date, "now", () => now);
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		for (const footer of [false, true]) {
+			const played: number[] = [];
+			const controller = new CacheTimerController({ soundPlayer: (_file, repeat = 1) => played.push(repeat) });
+			const mock = createMockUi();
+			let broken = true;
+			let renders = 0;
+			const render = () => {
+				if (broken) throw new Error("simulated UI teardown");
+				renders++;
+			};
+			if (footer) controller.setFooterRenderer(render);
+			else (mock.ctx.ui as any).setWidget = render;
+			try {
+				controller.handleAgentSettled(mock.ctx);
+				t.mock.timers.tick(6000);
+				assert.equal(controller.getState().hasTimer, true, "presentation failure must not stop the shared loop");
+				now += 150_000;
+				t.mock.timers.tick(1000);
+				assert.deepEqual(played, [1]);
+				broken = false;
+				t.mock.timers.tick(1000);
+				assert.ok(renders > 0, "rendering recovers without another lifecycle event");
+			} finally { controller.dispose(); }
+			assert.equal(controller.getState().hasTimer, false);
+		}
 	});
 });
