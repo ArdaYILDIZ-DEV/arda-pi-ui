@@ -41,7 +41,7 @@ describe("extension startup compatibility", () => {
 			} as unknown as ExtensionAPI));
 			assert.equal(proto.render, render);
 			assert.deepEqual(proto.render(80), ["", "default message", ""]);
-			assert.ok(failures.includes("[arda-pi-ui] Compact user messages disabled during Pi API setup."));
+			assert.ok(failures.includes("[arda-pi-ui] User message patch disabled; keeping Pi's default rendering."));
 		} finally {
 			Object.defineProperty(proto, "render", descriptor);
 			console.error = originalError;
@@ -69,6 +69,7 @@ describe("extension startup compatibility", () => {
 		}
 
 		assert.deepEqual(failures, [
+			"[arda-pi-ui] Prompt editor disabled during Pi API setup.",
 			"[arda-pi-ui] Spinner disabled during Pi API setup.",
 			"[arda-pi-ui] Git status disabled during Pi API setup.",
 			"[arda-pi-ui] Cache timer disabled during Pi API setup.",

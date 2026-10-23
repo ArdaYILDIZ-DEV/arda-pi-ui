@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { initTheme, UserMessageComponent } from "@earendil-works/pi-coding-agent";
 import { installCompactUserMessagePatch } from "../user-message.ts";
+import { markPromptLine } from "../prompt-marker.ts";
 
 const start = "\x1b]133;A\x07";
 const end = "\x1b]133;B\x07";
@@ -13,13 +14,17 @@ describe("compact user messages", () => {
 		const proto = UserMessageComponent.prototype;
 		const descriptor = Object.getOwnPropertyDescriptor(proto, "render")!;
 		try {
-			const component = new UserMessageComponent("hello **world**");
+			const component = new UserMessageComponent("hello **world**", undefined, 2);
 			const original = component.render(40);
 			assert.ok(original.length >= 3);
 			installCompactUserMessagePatch(proto);
 			const compact = component.render(40);
 			assert.equal(compact.length, original.length - 2);
-			assert.equal(compact[0], start + original[1] + end + final);
+			assert.equal(compact[0], start + markPromptLine(original[1], true) + end + final);
+			const defaultPadding = new UserMessageComponent("default padding");
+			assert.match(defaultPadding.render(40)[0], /❯/);
+			defaultPadding.setOutputPad(0);
+			assert.match(defaultPadding.render(40)[0], /❯/);
 		} finally {
 			Object.defineProperty(proto, "render", descriptor);
 		}

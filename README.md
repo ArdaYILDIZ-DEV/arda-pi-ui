@@ -14,7 +14,8 @@ Pi discovers the extension in this directory. Restart Pi or run `/reload` to loa
 
 ## Features
 
-- **Past user messages:** removes top and bottom padding while preserving OSC 133 prompt navigation. Uses a reload-safe render patch because Pi has no vertical-padding hook for user messages; setup failures are logged and leave the default renderer intact.
+- **Prompt markers:** shows `❯` on the first content line of the active editor and a dim `❯` on sent user messages. The editor uses Pi's public editor factory and padding APIs; custom editors without `setPaddingX` keep their existing rendering and log a compatibility warning. Very narrow editors without two padding columns are left unmarked.
+- **Past user messages:** removes top and bottom padding while preserving OSC 133 prompt navigation. Uses the existing reload-safe render patch because Pi has no user-message render hook, and enforces at least two horizontal padding columns through `setOutputPad`. Setup failures are logged and leave the default renderer intact. Runtime padding or marker failures disable the customization for the affected component and are logged once rather than on every redraw.
 - **Tools:** target/scope, text-based status, execution duration when available, and incomplete-output warnings. Expanded calls retain their tool name and full command.
 - **Edits:** added/removed line counts, small inline previews and full syntax-highlighted diffs on expansion.
 - **Themes:** uses the active Pi theme's semantic colors and appearance, including 256-color mode. No personal theme files are required.
