@@ -1,10 +1,11 @@
 /** Arda's compact Pi UI: working indicator, two-row footer and tool views. */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { UserMessageComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerSpinner } from "./spinner.ts";
 import { registerCacheTimer } from "./cache-timer.ts";
 import { registerGitInfo, formatGitSummary } from "./git-info.ts";
 import { registerToolRenderers } from "./tool-renderers.ts";
 import { registerFooter } from "./footer.ts";
+import { installCompactUserMessagePatch } from "./user-message.ts";
 
 export { registerFooter, buildFooterLines } from "./footer.ts";
 export { ToolDiffComponent, renderToolDiffLines } from "./tool-diff.ts";
@@ -54,6 +55,9 @@ function registerSafely<T>(feature: string, register: () => T): T | undefined {
 }
 
 export default function (pi: ExtensionAPI): void {
+	registerSafely("Compact user messages", () =>
+		installCompactUserMessagePatch(UserMessageComponent.prototype),
+	);
 	registerSafely("Spinner", () => registerSpinner(pi));
 	const gitController = registerSafely("Git status", () => registerGitInfo(pi));
 	const cacheController = registerSafely("Cache timer", () =>

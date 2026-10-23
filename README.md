@@ -14,6 +14,7 @@ Pi discovers the extension in this directory. Restart Pi or run `/reload` to loa
 
 ## Features
 
+- **Past user messages:** removes top and bottom padding while preserving OSC 133 prompt navigation. Uses a reload-safe render patch because Pi has no vertical-padding hook for user messages; setup failures are logged and leave the default renderer intact.
 - **Tools:** target/scope, text-based status, execution duration when available, and incomplete-output warnings. Expanded calls retain their tool name and full command.
 - **Edits:** added/removed line counts, small inline previews and full syntax-highlighted diffs on expansion.
 - **Themes:** uses the active Pi theme's semantic colors and appearance, including 256-color mode. No personal theme files are required.

@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { discoverAndLoadExtensions, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { discoverAndLoadExtensions, UserMessageComponent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../index.ts";
 
 describe("extension startup compatibility", () => {
@@ -22,6 +22,29 @@ describe("extension startup compatibility", () => {
 			assert.ok(loaded.handlers.has("session_shutdown"));
 		} finally {
 			await rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("logs a failed user message patch without crashing or changing the original renderer", () => {
+		const proto = UserMessageComponent.prototype;
+		const descriptor = Object.getOwnPropertyDescriptor(proto, "render")!;
+		const render = (_width: number) => ["", "default message", ""];
+		const failures: string[] = [];
+		const originalError = console.error;
+		try {
+			Object.defineProperty(proto, "render", { ...descriptor, value: render, writable: false });
+			console.error = (message: string) => failures.push(message);
+			assert.doesNotThrow(() => extension({
+				on() {},
+				registerCommand() {},
+				registerToolRenderer() {},
+			} as unknown as ExtensionAPI));
+			assert.equal(proto.render, render);
+			assert.deepEqual(proto.render(80), ["", "default message", ""]);
+			assert.ok(failures.includes("[arda-pi-ui] Compact user messages disabled during Pi API setup."));
+		} finally {
+			Object.defineProperty(proto, "render", descriptor);
+			console.error = originalError;
 		}
 	});
 
