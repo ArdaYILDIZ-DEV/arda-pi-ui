@@ -41,6 +41,26 @@ const FRAME_MS = 120;
 // Repaint once per glyph frame; avoid redundant UI updates between frames.
 const TICK_MS = FRAME_MS;
 
+const ANIMATIONS = {
+	original: { frames: SPINNER, frameMs: TICK_MS },
+	rotate: { frames: ["|", "/", "-", "\\"], frameMs: 240 },
+	// A compact rotating trail: smooth motion without changing the glyph's footprint.
+	orbit: { frames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], frameMs: 100 },
+	// Four-dot interlacing trails keep a steady visual weight as they cross.
+	helix: { frames: ["⢎", "⢕", "⢣", "⢱", "⡱", "⡣", "⡕", "⡎"], frameMs: 140 },
+	// A soft density wave; repeated extrema give the opening and closing room to breathe.
+	ripple: { frames: ["⠒", "⠶", "⣶", "⣿", "⣿", "⠿", "⠶", "⠒", "⠒"], frameMs: 120 },
+	// A contiguous four-dot arc sweeps the perimeter, including across the loop seam.
+	comet: { frames: ["⠹", "⠛", "⠏", "⡇", "⣆", "⣤", "⣰", "⢸"], frameMs: 90 },
+	// Two staggered pairs of dots scroll around the four braille rows.
+	weave: { frames: ["⢣", "⢎", "⡜", "⡱"], frameMs: 160 },
+} as const;
+
+type SpinnerAnimation = keyof typeof ANIMATIONS;
+const ANIMATION_NAMES = Object.keys(ANIMATIONS) as SpinnerAnimation[];
+// Leave each animation time to settle; switch only after a whole number of loops.
+const ANIMATION_DWELL_MS = 8000;
+
 // AI / teknoloji / bilim / mistik karışımı, tek kelimelik edilgen fiiller (200 adet)
 const VERBS = [
 	// Makine öğrenmesi
@@ -288,6 +308,10 @@ export interface SpinnerPaint {
 export type ThinkingStatus = "thinking" | number | null;
 
 export interface SpinnerFrameState {
+	/** Omitted for standalone callers to retain the original animation. */
+	readonly animation?: SpinnerAnimation;
+	/** Local glyph clock, independent of the request's elapsed time. */
+	readonly animationTimeMs?: number;
 	readonly verb: string;
 	/** Milliseconds since the request (agent loop) started. */
 	readonly timeMs: number;
@@ -510,8 +534,14 @@ export function buildSpinnerLine(
 		state.timeMs >= 0
 			? Math.floor(state.timeMs)
 			: 0;
-	const frame = Math.floor(timeMs / FRAME_MS) % SPINNER.length;
-	const glyph = paint.accent(SPINNER[frame] ?? "✻");
+	const animation = ANIMATIONS[state?.animation ?? "original"] ?? ANIMATIONS.original;
+	const animationTimeMs =
+		typeof state?.animationTimeMs === "number" &&
+		Number.isFinite(state.animationTimeMs) && state.animationTimeMs >= 0
+			? state.animationTimeMs
+			: timeMs;
+	const frame = Math.floor(animationTimeMs / animation.frameMs) % animation.frames.length;
+	const glyph = paint.accent(animation.frames[frame] ?? "✻");
 	const message = `${rawVerb}…`;
 	const messageWidth = visibleWidth(message);
 
@@ -694,6 +724,10 @@ export interface SpinnerStateSnapshot {
 
 export class SpinnerController {
 	private animStartMs = 0;
+	private animation: SpinnerAnimation = "original";
+	private hasSelectedAnimation = false;
+	private animationStartedMs = 0;
+	private animationSwitchMs = 0;
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private settledTokens = 0;
 	private streamTokens = 0;
@@ -848,14 +882,40 @@ export class SpinnerController {
 		return paint;
 	}
 
+	private selectAnimation(now: number): void {
+		const candidates = this.hasSelectedAnimation
+			? ANIMATION_NAMES.filter((name) => name !== this.animation)
+			: ANIMATION_NAMES;
+		this.animation = candidates[Math.floor(Math.random() * candidates.length)] ?? "original";
+		this.hasSelectedAnimation = true;
+		this.animationStartedMs = now;
+		const { frames, frameMs } = ANIMATIONS[this.animation];
+		const cycleMs = frames.length * frameMs;
+		this.animationSwitchMs = now + Math.ceil(ANIMATION_DWELL_MS / cycleMs) * cycleMs;
+	}
+
+	private restartAnimationLoop(ctx: UiCtx): void {
+		if (this.timer !== null) clearInterval(this.timer);
+		this.timer = setInterval(() => this.repaint(ctx), ANIMATIONS[this.animation].frameMs);
+		this.timer.unref?.();
+	}
+
 	public repaint(ctx: UiCtx): void {
 		if (!ctx.hasUI || this.timer === null) return;
 		try {
+			const now = Date.now();
+			if (now >= this.animationSwitchMs) {
+				this.selectAnimation(now);
+				// Replace only the glyph interval, preserving pending thinking/rate updates.
+				this.restartAnimationLoop(ctx);
+			}
 			const theme = ctx.ui?.theme;
 			const line = buildSpinnerLine(
 				{
 					verb: this.verb,
-					timeMs: Math.max(0, Date.now() - this.animStartMs),
+					animation: this.animation,
+					animationTimeMs: Math.max(0, now - this.animationStartedMs),
+					timeMs: Math.max(0, now - this.animStartMs),
 					columns:
 						process.stdout?.columns && process.stdout.columns > 0
 							? process.stdout.columns
@@ -927,8 +987,8 @@ export class SpinnerController {
 		this.effortSuffix = "";
 		this.stopLoop();
 		if (!ctx.hasUI) return;
-		this.timer = setInterval(() => this.repaint(ctx), TICK_MS);
-		this.timer.unref?.();
+		this.selectAnimation(this.animStartMs);
+		this.restartAnimationLoop(ctx);
 		this.repaint(ctx);
 	}
 
