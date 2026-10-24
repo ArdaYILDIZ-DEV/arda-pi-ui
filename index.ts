@@ -7,6 +7,10 @@ import { registerToolRenderers } from "./tool-renderers.ts";
 import { registerFooter } from "./footer.ts";
 import { installCompactUserMessagePatch } from "./user-message.ts";
 import { registerPromptEditor } from "./prompt-editor.ts";
+import { registerHeader } from "./header.ts";
+
+export { registerHeader, HeaderComponent, buildHeaderLines } from "./header.ts";
+export { DEFAULT_HEADER_CONFIG, parseHeaderConfig, readHeaderSettings } from "./header-settings.ts";
 
 export { registerFooter, buildFooterLines } from "./footer.ts";
 export { ToolDiffComponent, renderToolDiffLines } from "./tool-diff.ts";
@@ -59,6 +63,7 @@ export default function (pi: ExtensionAPI): void {
 	registerSafely("Compact user messages", () =>
 		installCompactUserMessagePatch(UserMessageComponent.prototype),
 	);
+	registerSafely("Header", () => registerHeader(pi));
 	registerSafely("Prompt editor", () => registerPromptEditor(pi));
 	registerSafely("Spinner", () => registerSpinner(pi));
 	const gitController = registerSafely("Git status", () => registerGitInfo(pi));

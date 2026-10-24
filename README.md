@@ -14,6 +14,7 @@ Pi discovers the extension in this directory. Restart Pi or run `/reload` to loa
 
 ## Features
 
+- **Header:** the original pixel “Pi” wordmark and falling-block entrance from pi-cc-header, with theme-aware information and configurable color/gradient/stripes. Reads existing `ccHeader` settings without migrating or writing them; see [Header configuration](#header-configuration).
 - **Prompt markers:** shows `❯` on the first content line of the active editor and a dim `❯` on sent user messages. The editor uses Pi's public editor factory and padding APIs; custom editors without `setPaddingX` keep their existing rendering and log a compatibility warning. Very narrow editors without two padding columns are left unmarked.
 - **Past user messages:** removes top and bottom padding while preserving OSC 133 prompt navigation. Uses the existing reload-safe render patch because Pi has no user-message render hook, and enforces at least two horizontal padding columns through `setOutputPad`. Setup failures are logged and leave the default renderer intact. Runtime padding or marker failures disable the customization for the affected component and are logged once rather than on every redraw.
 - **Tools:** target/scope, text-based status, execution duration when available, and incomplete-output warnings. Expanded calls retain their tool name and full command.
@@ -42,6 +43,10 @@ The idle reminder is not proof that a provider cache entry is still available. C
 
 | Command | Action |
 | --- | --- |
+| `/arda-header` | Show header settings for this session |
+| `/arda-header on`, `off`, `reload`, `reset` | Show/hide the entire header, reload saved settings, or use defaults (session only) |
+| `/arda-header replay` | Replay the falling-block logo animation without changing settings |
+| `/arda-header <key> <value>` | Change a `ccHeader` setting for this session; booleans use `true`/`false` |
 | `/arda-tools` | Show compact tool-view status |
 | `/arda-tools on`, `off`, `toggle` | Enable, disable or toggle compact tool views |
 | `/cache` | Show recorded read/write/uncached tokens, local idle time and audio status |
@@ -51,6 +56,50 @@ The idle reminder is not proof that a provider cache entry is still available. C
 | `/git refresh` | Refresh local Git and query open-PR information via `gh` (network access) |
 
 Only Pi's extension status entries are combined; custom widgets remain separate. Another extension that installs a footer later takes precedence. Headless sessions do not start UI timer loops or automatic Git inspections.
+
+## Header configuration
+
+Header settings remain in the global Pi `settings.json` under `ccHeader`, resolved through Pi's active agent directory (`getAgentDir()`, including `PI_CODING_AGENT_DIR`). Project settings are not merged into this block, matching pi-cc-header. Existing settings work without moving or renaming keys. There is no other central arda-pi-ui settings namespace to migrate to.
+
+When migrating from pi-cc-header, remove only `npm:pi-cc-header` from `packages`, retain `ccHeader`, then restart Pi or run `/reload`. Do not load the old entry point explicitly. The new module checks registered extension command provenance and yields if pi-cc-header is still loaded, independent of session-handler order. This avoids competing header owners; it does not disable or modify the old package. Merely leaving its files in `node_modules` does not activate it.
+
+For example, this existing block is supported unchanged:
+
+```json
+{
+  "ccHeader": {
+    "color": "a",
+    "ver": 1,
+    "grad": true,
+    "lines": false,
+    "pkg": false,
+    "speed": 100,
+    "slogan": "Gurur duyacağın bir şey kodla.",
+    "sloganOn": true,
+    "sloganColor": true,
+    "disabled": false
+  }
+}
+```
+
+| Key | Default | Meaning / valid values |
+| --- | --- | --- |
+| `color` | `"c"` | `a` Anthropic, `c` Clawd, `r` red, `o` orange, `y` yellow, `g` green, `w` white, `b` blue, `p` purple; `theme` follows the host accent |
+| `ver` | `1` | Color neither label nor version (`0`), only “Pi” (`1`), or both (`2`). The version is always displayed. |
+| `grad` | `true` | Subtle vertical logo shading |
+| `lines` | `true` | Horizontal stripe treatment within the logo, not divider lines around the header |
+| `pkg` | `false` | Add a separate count of package-provided skills; local skill count remains visible |
+| `speed` | `50` | Milliseconds per entrance frame: `25`, `50`, `75`, `100` (lower is faster) |
+| `slogan` | `"Code something that makes you proud"` | Up to 85 UTF-16 code units, matching the legacy limit; empty is allowed |
+| `sloganOn` | `true` | Show the slogan |
+| `sloganColor` | `true` | Use the selected accent rather than muted text for the slogan |
+| `disabled` | `false` | Render no header at all, including no built-in fallback; start no header timer |
+
+Invalid fields independently fall back to defaults and produce a warning. Missing settings use defaults. Malformed/unreadable settings also use defaults and warn, but are **never repaired, backed up or overwritten** by the extension. Unknown fields, including legacy `readOnlyConfig`, are ignored; all header commands are already read-only with respect to disk. Command changes last until another session starts or `/arda-header reload` is used. For example: `/arda-header color theme`, `/arda-header speed 100`, `/arda-header slogan Your next idea`, `/arda-header sloganColor false`.
+
+The six-row layout preserves the original pixel “Pi” lettering, falling red/cyan/green pieces, assembly flashes and final colored logo. Rendering uses the shared palette, active host appearance and color encoding. At fewer than 40 columns, text takes priority over the logo; strings are terminal-sanitized and truncated with Pi's grapheme-aware helpers. Explicit legacy colors are adapted for light-background readability. The original 22-frame entrance runs for startup/new sessions and stops completely afterward; reload/resume/fork render the settled mark immediately. Use `/arda-header replay` to watch it again after reloading. Replacement, shutdown and disposal cancel pending animation work. Non-TUI modes install nothing and start no header timers.
+
+Resource counts use registered skill/prompt command metadata, not filesystem guesses or leftover npm directories. Skills whose slash commands are disabled are therefore not counted. “Packages” means configured global packages, including object-form entries, not the number of loaded extension files. This intentionally replaces the old approximate installed/residual extension count. Model/thinking level and theme are read afresh on render. Unlike pi-cc-header, this module never clears the terminal or changes `quietStartup`, `clearOnStart` or other Pi settings. Existing values of those settings remain untouched. Old `/hc`, `/hv`, etc. commands are replaced by `/arda-header`; destructive config-reset/uninstall commands are not carried over.
 
 ## Prompt caching
 
@@ -81,6 +130,9 @@ npm test
 The layout stays flat: each module owns a feature or a shared rendering primitive, without a service/container layer.
 
 - `index.ts`: composition and public exports; setup failures are isolated per feature.
+- `header.ts`: pure header layout, finite animation ownership and `/arda-header` lifecycle integration.
+- `header-logo.ts`: host-independent pixel “Pi” rasterization and falling-block choreography.
+- `header-settings.ts`: typed, validated legacy `ccHeader` configuration and read-only global settings loading.
 - `spinner.ts`: progress formatting, stream-rate tracking and spinner lifecycle.
 - `footer.ts`: responsive footer composition, recorded session cost and subscriptions.
 - `cache-timer.ts`: cache lifecycle, shared refresh loop, sound milestones and `/cache`.
@@ -96,4 +148,4 @@ Imports from `index.ts` and existing feature modules remain available. In partic
 
 ## License
 
-MIT, as declared in `package.json`. A standalone license file is not included.
+MIT, as declared in `package.json`. A standalone project license file is not included. The header was independently reimplemented after reviewing MIT-licensed pi-cc-header; its attribution and license notice are retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The original Pi wordmark and animation choreography are retained through a new sprite-based renderer; no upstream frame table or runtime dependency is included.

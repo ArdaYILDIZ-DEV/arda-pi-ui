@@ -17,6 +17,7 @@ describe("extension startup compatibility", () => {
 			assert.equal(loaded.toolRenderers?.length, 1);
 			assert.equal(loaded.tools.size, 0);
 			assert.ok(loaded.commands.has("arda-tools"));
+			assert.ok(loaded.commands.has("arda-header"));
 			assert.ok(!loaded.commands.has("cc-tools"));
 			assert.ok(loaded.handlers.has("agent_settled"));
 			assert.ok(loaded.handlers.has("session_shutdown"));
@@ -69,6 +70,7 @@ describe("extension startup compatibility", () => {
 		}
 
 		assert.deepEqual(failures, [
+			"[arda-pi-ui] Header disabled during Pi API setup.",
 			"[arda-pi-ui] Prompt editor disabled during Pi API setup.",
 			"[arda-pi-ui] Spinner disabled during Pi API setup.",
 			"[arda-pi-ui] Git status disabled during Pi API setup.",
