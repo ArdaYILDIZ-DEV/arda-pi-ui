@@ -41,6 +41,53 @@ const FRAME_MS = 120;
 // Repaint once per glyph frame; avoid redundant UI updates between frames.
 const TICK_MS = FRAME_MS;
 
+// 5-bit Gray code: exactly one bit flips per tick, so the counter ripples smoothly
+// instead of flickering, and the last frame differs from the first by one bit (seamless loop).
+const BINARY_FRAMES: readonly string[] = Array.from({ length: 32 }, (_, i) =>
+	(i ^ (i >> 1)).toString(2).padStart(5, "0"),
+);
+
+// A short morse phrase scrolls through a fixed six-cell window (every frame is 6 wide).
+const MORSE_CYCLE = "·-··--·-···-";
+const MORSE_FRAMES: readonly string[] = Array.from({ length: MORSE_CYCLE.length }, (_, i) =>
+	(MORSE_CYCLE + MORSE_CYCLE).slice(i, i + 6),
+);
+
+// Braille dot bits per [column][row], rows top → bottom. Lets frames be drawn as pixels.
+const BRAILLE_DOT: readonly (readonly number[])[] = [
+	[0x01, 0x02, 0x04, 0x40],
+	[0x08, 0x10, 0x20, 0x80],
+];
+const brailleChar = (bits: number): string => String.fromCharCode(0x2800 + bits);
+
+// Two sine strands in opposite phase scroll one dot column per tick through a
+// four-cell window (8 dot columns), so they cross like a double helix.
+// The pattern repeats after half a period (the strands swap), hence length / 2 frames.
+// Row at column c + half a period is the mirror (3 - row), which is the second strand.
+const STRAND_ROWS: readonly number[] = [1, 0, 0, 0, 1, 2, 2, 3, 3, 3, 2, 1];
+const DNA_FRAMES: readonly string[] = Array.from({ length: STRAND_ROWS.length / 2 }, (_, shift) =>
+	Array.from({ length: 4 }, (_, cell) => {
+		let bits = 0;
+		for (let side = 0; side < 2; side++) {
+			const col = shift + cell * 2 + side;
+			const a = STRAND_ROWS[col % STRAND_ROWS.length]!;
+			const b = STRAND_ROWS[(col + STRAND_ROWS.length / 2) % STRAND_ROWS.length]!;
+			bits |= BRAILLE_DOT[side]![a]! | BRAILLE_DOT[side]![b]!;
+		}
+		return brailleChar(bits);
+	}).join(""),
+);
+
+// One dot falls down each of four cells, staggered, then the cell rests for two ticks.
+const RAIN_PHASES: readonly number[] = [0, 3, 1, 4];
+const RAIN_PERIOD = 6;
+const RAIN_FRAMES: readonly string[] = Array.from({ length: RAIN_PERIOD }, (_, tick) =>
+	RAIN_PHASES.map((phase, cell) => {
+		const row = (tick + phase) % RAIN_PERIOD;
+		return row < 4 ? brailleChar(BRAILLE_DOT[cell % 2]![row]!) : " ";
+	}).join(""),
+);
+
 const ANIMATIONS = {
 	original: { frames: SPINNER, frameMs: TICK_MS },
 	rotate: { frames: ["|", "/", "-", "\\"], frameMs: 240 },
@@ -54,6 +101,41 @@ const ANIMATIONS = {
 	comet: { frames: ["⠹", "⠛", "⠏", "⡇", "⣆", "⣤", "⣰", "⢸"], frameMs: 90 },
 	// Two staggered pairs of dots scroll around the four braille rows.
 	weave: { frames: ["⢣", "⢎", "⡜", "⡱"], frameMs: 160 },
+	// Knight Rider scanner: a single lit cell sweeps a five-cell bar and back.
+	scanner: {
+		frames: ["▰▱▱▱▱", "▱▰▱▱▱", "▱▱▰▱▱", "▱▱▱▰▱", "▱▱▱▱▰", "▱▱▱▰▱", "▱▱▰▱▱", "▱▰▱▱▱"],
+		frameMs: 90,
+	},
+	// A transmitter dot sends out arcs that grow and fade back, like a broadcast.
+	signal: { frames: ["·   ", "·)  ", "·)) ", "·)))", "·)) ", "·)  "], frameMs: 130 },
+	// A five-bit Gray-code counter: one digit flips at a time, like a bit scanning across.
+	binary: { frames: BINARY_FRAMES, frameMs: 70 },
+	// A thin box-drawing stroke pivots around the cell like a turning key.
+	pivot: { frames: ["┤", "┘", "┴", "└", "├", "┌", "┬", "┐"], frameMs: 110 },
+	// Calculus and ML notation (gradient, integral, sum…) cycling in place.
+	calculus: { frames: ["∂", "∇", "∫", "∑", "∏", "∞"], frameMs: 200 },
+	// A small face that holds still, then blinks.
+	blink: {
+		frames: ["(•_•)", "(•_•)", "(•_•)", "(•_•)", "(-_-)", "(•_•)", "(•_•)", "(•_•)"],
+		frameMs: 160,
+	},
+	// Chat-style typing indicator: three dots rise and fall in a rolling wave.
+	typing: { frames: [".·˙", "·˙·", "˙·.", "·.·"], frameMs: 150 },
+	// Three stars twinkle out of phase: dim → bright → dim.
+	twinkle: { frames: ["· ✧ ✦", "✧ ✦ ✧", "✦ ✧ ·", "✧ · ✧"], frameMs: 180 },
+	// A dot grows inside brackets, like a lens locking focus.
+	focus: { frames: ["[   ]", "[ · ]", "[ • ]", "[ ● ]", "[ • ]", "[ · ]"], frameMs: 140 },
+	// A morse phrase scrolls through a six-cell window.
+	morse: { frames: MORSE_FRAMES, frameMs: 130 },
+	// A double helix scrolls by: two braille strands crossing every few dots.
+	dna: { frames: DNA_FRAMES, frameMs: 110 },
+	// Dots fall through four braille cells at staggered times, like light rain.
+	rain: { frames: RAIN_FRAMES, frameMs: 120 },
+	// Newton's cradle: the end ball swings out, the impact passes through, the other end answers.
+	cradle: {
+		frames: ["● ●●● ", "● ●●● ", " ●●●● ", " ●●● ●", " ●●● ●", " ●●●● "],
+		frameMs: 130,
+	},
 } as const;
 
 type SpinnerAnimation = keyof typeof ANIMATIONS;
@@ -541,7 +623,6 @@ export function buildSpinnerLine(
 			? state.animationTimeMs
 			: timeMs;
 	const frame = Math.floor(animationTimeMs / animation.frameMs) % animation.frames.length;
-	const glyph = paint.accent(animation.frames[frame] ?? "✻");
 	const message = `${rawVerb}…`;
 	const messageWidth = visibleWidth(message);
 
@@ -551,14 +632,24 @@ export function buildSpinnerLine(
 			: 80;
 	const cols = Math.max(0, Math.floor(rawCols));
 
+	// Some animations are several cells wide. Measure the frame instead of assuming one cell,
+	// and collapse to a single-cell glyph when the terminal is too narrow to fit it.
+	let frameText: string = animation.frames[frame] ?? "✻";
+	let glyphWidth = Math.max(1, visibleWidth(frameText));
+	if (cols > 0 && glyphWidth > 1 && cols < glyphWidth + 4) {
+		frameText = "·";
+		glyphWidth = 1;
+	}
+	const glyph = paint.accent(frameText);
+
 	// Progressive ultra-narrow viewport collapsing for constrained positive columns
 	if (cols === 1) return glyph;
 	if (cols === 2) return `${glyph} `;
 	if (cols === 3) return `${glyph} …`;
 
 	// Ultra-narrow: truncate verb stem to avoid terminal line wrapping when cols is bounded
-	if (cols > 0 && cols < 2 + messageWidth) {
-		const maxStemWidth = cols - 3;
+	if (cols > 0 && cols < glyphWidth + 1 + messageWidth) {
+		const maxStemWidth = cols - (glyphWidth + 2);
 		const chars = Array.from(rawVerb);
 		const truncatedStem = chars.slice(0, Math.max(1, maxStemWidth)).join("");
 		const truncatedMessage = `${truncatedStem}…`;
@@ -566,7 +657,7 @@ export function buildSpinnerLine(
 	}
 
 	const verbSpan = paint.accent(message);
-	const availableSpace = cols > 0 ? cols - (2 + messageWidth) : -1;
+	const availableSpace = cols > 0 ? cols - (glyphWidth + 1 + messageWidth) : -1;
 
 	// Space below 4 cannot fit any byline (` (x)` requires min 4 columns)
 	if (availableSpace < 4) {
