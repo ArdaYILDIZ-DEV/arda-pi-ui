@@ -19,10 +19,22 @@ Pi discovers the extension in this directory. Restart Pi or run `/reload` to loa
 - **Tools:** target/scope, text-based status, execution duration when available, and incomplete-output warnings. Expanded calls retain their tool name and full command.
 - **Edits:** added/removed line counts, small inline previews and full syntax-highlighted diffs on expansion.
 - **Themes:** uses the active Pi theme's semantic colors and appearance, including 256-color mode. No personal theme files are required.
-- **Progress:** animated spinner, Turkish action/thinking text, elapsed time and live `tok/s`. Rates are estimates when the provider does not report live usage.
+- **Progress:** seven single-cell spinner animations, Turkish action/thinking text, elapsed time and live `tok/s`. Animations are chosen randomly at the start of each UI run and change while waiting, without consecutive repeats. Rates are estimates when the provider does not report live usage.
 - **Footer:** model, folder, Git, context usage, cache share and session cost estimate. Other extensions' status entries appear below and wrap on narrow terminals. Context and cost take priority when space is limited; cache information that does not fit moves below instead of disappearing. Very narrow layouts retain the context percentage instead of a clipped model name.
 - **Git:** one non-locking local status command per refresh, including detached HEAD and untracked files. Unchanged snapshots do not trigger redraws. GitHub is contacted only by `/git refresh`, not on startup or tool completion.
 - **Cache:** shows the latest request’s recorded cache-read share alongside a fixed five-minute idle reminder. No extra model requests or cache settings changes. Audio reminders require an existing `mpv`, `ffplay` or macOS `afplay`.
+
+The spinner switches after at least eight seconds, at the end of a complete animation loop (about 8–9 seconds). Transitions restart only the glyph clock, not the request timer, token rate or thinking state. All animations use the active theme's accent color, without flashes or added effects:
+
+| Animation | Frames | Frame duration |
+| --- | --- | --- |
+| Original | Original forward/reverse glyphs, with the Ghostty adjustment preserved | 120 ms |
+| Rotating line | `\| / - \` | 240 ms |
+| Braille orbit | `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` | 100 ms |
+| Interlacing helix | `⢎ ⢕ ⢣ ⢱ ⡱ ⡣ ⡕ ⡎` — two crossing trails with constant dot density | 140 ms |
+| Breathing ripple | `⠒ ⠶ ⣶ ⣿ ⣿ ⠿ ⠶ ⠒ ⠒` — density wave with short rests at the extrema | 120 ms |
+| Comet arc | `⠹ ⠛ ⠏ ⡇ ⣆ ⣤ ⣰ ⢸` — a continuous four-dot arc sweeping the perimeter | 90 ms |
+| Diagonal weave | `⢣ ⢎ ⡜ ⡱` | 160 ms |
 
 The idle reminder is not proof that a provider cache entry is still available. Costs are provider-recorded estimates, not invoices or subscription charges; unknown prices show `$? est`. Output line counts are not match counts, and expansion cannot recover content already truncated by a tool.
 
